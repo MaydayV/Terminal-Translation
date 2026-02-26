@@ -21,6 +21,11 @@
 - 平台：macOS、Windows（MVP）
 - Provider：`deepseek`、`openai-compatible`、`mock`
 
+## 浮窗行为（macOS）
+- 当 Terminal / iTerm2 处于前台时，浮窗会贴在终端窗口底部并跟随移动。
+- 切换到非终端应用时，浮窗会自动隐藏，避免遮挡。
+- 对暂未适配窗口坐标读取的终端（如部分第三方终端），会回退为屏幕底部固定显示。
+
 ## 快速开始
 ### 1. 安装依赖（开发环境）
 ```bash
