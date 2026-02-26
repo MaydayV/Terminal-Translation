@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg(target_os = "macos")]
 use core_foundation::base::{CFType, TCFType};
@@ -39,11 +39,20 @@ struct SharedWriter {
 struct FrontendBridge {
     ready: Arc<AtomicBool>,
     pending: Arc<Mutex<Vec<IpcEnvelope>>>,
+    notification_pending: Arc<AtomicBool>,
+    notifier: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
 impl FrontendBridge {
+    fn set_notifier(&self, app_handle: tauri::AppHandle) {
+        if let Ok(mut guard) = self.notifier.lock() {
+            *guard = Some(app_handle);
+        }
+    }
+
     fn mark_ready(&self) {
         self.ready.store(true, Ordering::SeqCst);
+        self.notify_events_available_if_needed(self.pending_len());
     }
 
     fn is_ready(&self) -> bool {
@@ -58,17 +67,78 @@ impl FrontendBridge {
     }
 
     fn enqueue_envelope(&self, envelope: IpcEnvelope) {
-        if let Ok(mut guard) = self.pending.lock() {
-            guard.push(envelope);
-        }
+        let pending_len = match self.pending.lock() {
+            Ok(mut guard) => {
+                guard.push(envelope);
+                guard.len()
+            }
+            Err(poisoned) => {
+                eprintln!("[tetr-ui] pending queue lock poisoned during enqueue; recovering");
+                let mut guard = poisoned.into_inner();
+                guard.push(envelope);
+                guard.len()
+            }
+        };
+
+        self.notify_events_available_if_needed(pending_len);
     }
 
     fn drain_events(&self) -> Vec<IpcEnvelope> {
-        if let Ok(mut guard) = self.pending.lock() {
-            return std::mem::take(&mut *guard);
+        match self.pending.lock() {
+            Ok(mut guard) => {
+                self.notification_pending.store(false, Ordering::SeqCst);
+                std::mem::take(&mut *guard)
+            }
+            Err(poisoned) => {
+                eprintln!("[tetr-ui] pending queue lock poisoned during drain; recovering");
+                let mut guard = poisoned.into_inner();
+                self.notification_pending.store(false, Ordering::SeqCst);
+                std::mem::take(&mut *guard)
+            }
+        }
+    }
+
+    fn pending_len(&self) -> usize {
+        match self.pending.lock() {
+            Ok(guard) => guard.len(),
+            Err(poisoned) => {
+                eprintln!("[tetr-ui] pending queue lock poisoned during pending_len; recovering");
+                let guard = poisoned.into_inner();
+                guard.len()
+            }
+        }
+    }
+
+    fn notify_events_available_if_needed(&self, pending_len: usize) {
+        if !should_emit_events_available(
+            self.is_ready(),
+            self.notification_pending.load(Ordering::SeqCst),
+            pending_len,
+        ) {
+            return;
         }
 
-        Vec::new()
+        if self.notification_pending.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let app_handle = match self.notifier.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                eprintln!("[tetr-ui] notifier lock poisoned during notify; recovering");
+                poisoned.into_inner().clone()
+            }
+        };
+
+        let Some(app_handle) = app_handle else {
+            self.notification_pending.store(false, Ordering::SeqCst);
+            return;
+        };
+
+        if let Err(err) = app_handle.emit(EVENTS_AVAILABLE_EVENT, json!({})) {
+            eprintln!("[tetr-ui] failed to emit events-available signal: {err}");
+            self.notification_pending.store(false, Ordering::SeqCst);
+        }
     }
 }
 
@@ -128,6 +198,18 @@ fn main() {
             drain_events
         ])
         .setup(move |app| {
+            frontend_bridge.set_notifier(app.handle().clone());
+
+            #[cfg(target_os = "macos")]
+            {
+                let policy = if should_show_dock_icon() {
+                    tauri::ActivationPolicy::Regular
+                } else {
+                    tauri::ActivationPolicy::Accessory
+                };
+                let _ = app.set_activation_policy(policy);
+            }
+
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_always_on_top(true);
                 let _ = window.set_decorations(true);
@@ -189,11 +271,20 @@ fn main() {
 
                 let reader = BufReader::new(stream);
                 for line in reader.lines() {
-                    let Ok(line) = line else {
-                        break;
+                    let line = match line {
+                        Ok(line) => line,
+                        Err(err) => {
+                            eprintln!("[tetr-ui] IPC read error: {err}");
+                            break;
+                        }
                     };
-                    let Ok(envelope) = serde_json::from_str::<IpcEnvelope>(&line) else {
-                        continue;
+                    let envelope = match serde_json::from_str::<IpcEnvelope>(&line) {
+                        Ok(envelope) => envelope,
+                        Err(err) => {
+                            let clipped = clip_log_text(&line, 180);
+                            eprintln!("[tetr-ui] IPC envelope parse error: {err}; line={clipped}");
+                            continue;
+                        }
                     };
 
                     frontend_bridge_clone.enqueue_envelope(envelope);
@@ -219,9 +310,65 @@ fn main() {
 
 const FRONTEND_RECOVERY_MAX_ATTEMPTS: u8 = 3;
 const FRONTEND_RECOVERY_INTERVAL_MS: u64 = 1500;
+const EVENTS_AVAILABLE_EVENT: &str = "tetr://events-available";
 
 fn should_trigger_frontend_reload(frontend_ready: bool, attempt: u8) -> bool {
     !frontend_ready && attempt < FRONTEND_RECOVERY_MAX_ATTEMPTS
+}
+
+fn should_emit_events_available(
+    frontend_ready: bool,
+    notification_pending: bool,
+    pending_len: usize,
+) -> bool {
+    frontend_ready && !notification_pending && pending_len > 0
+}
+
+fn clip_log_text(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+
+    let mut clipped = String::new();
+    for ch in input.chars().take(max_chars) {
+        clipped.push(ch);
+    }
+    clipped.push('…');
+    clipped
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::{should_emit_events_available, FrontendBridge};
+    use serde_json::json;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn frontend_bridge_recovers_from_poisoned_pending_mutex() {
+        let bridge = FrontendBridge::default();
+        bridge.enqueue("event.one", json!({ "id": 1 }));
+
+        let pending = bridge.pending.clone();
+        let panic_result = catch_unwind(AssertUnwindSafe(move || {
+            let _guard = pending.lock().expect("lock should succeed");
+            panic!("force-poison");
+        }));
+        assert!(panic_result.is_err(), "mutex should be poisoned");
+
+        bridge.enqueue("event.two", json!({ "id": 2 }));
+
+        let events = bridge.drain_events();
+        let names: Vec<&str> = events.iter().map(|e| e.event.as_str()).collect();
+        assert_eq!(names, vec!["event.one", "event.two"]);
+    }
+
+    #[test]
+    fn emits_notification_only_when_ready_and_not_pending_with_events() {
+        assert!(!should_emit_events_available(false, false, 1));
+        assert!(!should_emit_events_available(true, true, 1));
+        assert!(!should_emit_events_available(true, false, 0));
+        assert!(should_emit_events_available(true, false, 2));
+    }
 }
 
 fn start_frontend_recovery_watchdog(app_handle: tauri::AppHandle, frontend_bridge: FrontendBridge) {
@@ -289,13 +436,14 @@ fn start_macos_window_tracker(app_handle: tauri::AppHandle) {
     thread::spawn(move || {
         let mut last_geometry: Option<(i32, i32, u32, u32)> = None;
         let mut hidden = true;
+        let height_override = read_window_height_override_from_env();
 
         loop {
             let Some(window) = app_handle.get_webview_window("main") else {
                 break;
             };
 
-            match query_front_app_layout() {
+            match query_front_app_layout(height_override) {
                 FrontAppLayout::TerminalBounds {
                     x,
                     y,
@@ -347,7 +495,7 @@ fn set_window_geometry_logical(
 }
 
 #[cfg(target_os = "macos")]
-fn query_front_app_layout() -> FrontAppLayout {
+fn query_front_app_layout(height_override: Option<u32>) -> FrontAppLayout {
     let Some(front) = front_app_info() else {
         return FrontAppLayout::Unknown;
     };
@@ -360,7 +508,8 @@ fn query_front_app_layout() -> FrontAppLayout {
         return FrontAppLayout::TerminalWithoutBounds;
     };
 
-    let (panel_x, panel_y, panel_width, panel_height) = compute_panel_geometry(x, y, width, height);
+    let (panel_x, panel_y, panel_width, panel_height) =
+        compute_panel_geometry(x, y, width, height, height_override);
 
     FrontAppLayout::TerminalBounds {
         x: panel_x,
@@ -371,11 +520,29 @@ fn query_front_app_layout() -> FrontAppLayout {
 }
 
 #[cfg(target_os = "macos")]
-fn compute_panel_geometry(x: i32, y: i32, width: i32, height: i32) -> (i32, i32, u32, u32) {
-    let panel_height = ((height as f32 * 0.34).round() as i32).clamp(180, 320) as u32;
+fn compute_panel_geometry(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    height_override: Option<u32>,
+) -> (i32, i32, u32, u32) {
+    const DEFAULT_PANEL_HEIGHT: u32 = 260;
+    let panel_height = height_override.unwrap_or(DEFAULT_PANEL_HEIGHT);
     // Stack panel under terminal: panel top edge touches terminal bottom edge.
     let panel_y = y + height;
     (x, panel_y, width as u32, panel_height)
+}
+
+#[cfg(target_os = "macos")]
+fn read_window_height_override_from_env() -> Option<u32> {
+    let raw = env::var("TETR_UI_WINDOW_HEIGHT").ok()?;
+    let parsed = raw.trim().parse::<u32>().ok()?;
+    if (80..=900).contains(&parsed) {
+        Some(parsed)
+    } else {
+        None
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -454,11 +621,28 @@ fn should_hide_for_layout(layout: &FrontAppLayout) -> bool {
     !matches!(layout, FrontAppLayout::TerminalBounds { .. })
 }
 
+#[cfg(target_os = "macos")]
+fn should_show_dock_icon() -> bool {
+    should_show_dock_icon_from_env(env::var("TETR_UI_DOCK_ICON").ok().as_deref())
+}
+
+#[cfg(target_os = "macos")]
+fn should_show_dock_icon_from_env(raw: Option<&str>) -> bool {
+    let Some(raw) = raw else {
+        return false;
+    };
+
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::{
         compute_panel_geometry, is_terminal_bundle, should_hide_for_layout,
-        should_trigger_frontend_reload, FrontAppLayout,
+        should_show_dock_icon_from_env, should_trigger_frontend_reload, FrontAppLayout,
     };
 
     #[test]
@@ -497,11 +681,43 @@ mod tests {
     #[test]
     fn panel_should_stack_below_terminal_without_overlap() {
         let (panel_x, panel_y, panel_width, panel_height) =
-            compute_panel_geometry(100, 50, 1200, 600);
+            compute_panel_geometry(100, 50, 1200, 600, None);
         assert_eq!(panel_x, 100);
         assert_eq!(panel_width, 1200);
-        assert_eq!(panel_height, 204);
+        assert_eq!(panel_height, 260);
         assert_eq!(panel_y, 650);
+    }
+
+    #[test]
+    fn panel_default_height_should_not_depend_on_terminal_height() {
+        let (_, _, _, small_terminal_height) = compute_panel_geometry(100, 50, 1200, 240, None);
+        let (_, _, _, large_terminal_height) = compute_panel_geometry(100, 50, 1200, 900, None);
+        assert_eq!(small_terminal_height, large_terminal_height);
+        assert_eq!(small_terminal_height, 260);
+    }
+
+    #[test]
+    fn panel_height_override_should_take_priority() {
+        let (_, panel_y, _, panel_height) = compute_panel_geometry(10, 20, 1000, 500, Some(300));
+        assert_eq!(panel_height, 300);
+        assert_eq!(panel_y, 520);
+    }
+
+    #[test]
+    fn dock_icon_should_be_hidden_by_default() {
+        assert!(!should_show_dock_icon_from_env(None));
+        assert!(!should_show_dock_icon_from_env(Some("")));
+        assert!(!should_show_dock_icon_from_env(Some("0")));
+        assert!(!should_show_dock_icon_from_env(Some("off")));
+    }
+
+    #[test]
+    fn dock_icon_can_be_enabled_by_env_toggle() {
+        assert!(should_show_dock_icon_from_env(Some("1")));
+        assert!(should_show_dock_icon_from_env(Some("true")));
+        assert!(should_show_dock_icon_from_env(Some("yes")));
+        assert!(should_show_dock_icon_from_env(Some("on")));
+        assert!(should_show_dock_icon_from_env(Some(" TRUE ")));
     }
 
     #[test]
@@ -589,7 +805,10 @@ fn query_window_bounds_for_pid(pid: i32) -> Option<(i32, i32, i32, i32)> {
         let h = h.round() as i32;
 
         let area = i64::from(w) * i64::from(h);
-        if best.is_none_or(|(_, _, _, _, best_area)| area > best_area) {
+        if best
+            .map(|(_, _, _, _, best_area)| area > best_area)
+            .unwrap_or(true)
+        {
             best = Some((x, y, w, h, area));
         }
     }

@@ -17,7 +17,7 @@ body,
   width: 100%;
   height: 100%;
   color: var(--text);
-  background: var(--bg);
+  background: transparent;
   font-family: "SF Pro Text", "PingFang SC", "Segoe UI", sans-serif;
 }
 
@@ -31,9 +31,11 @@ body {
   min-height: 0;
   border-radius: 12px;
   border: 1px solid var(--line);
-  background: var(--bg);
+  background: var(--window-bg, var(--bg));
   overflow: hidden;
   display: flex;
+  flex-direction: column;
+  backdrop-filter: blur(4px);
 
   /* 调这里即可统一缩放整个翻译窗文字 */
   --window-font-size: 11px;
@@ -44,27 +46,28 @@ body {
   font-size: inherit;
 }
 
-.active-translation {
+.content-grid {
   flex: 1 1 auto;
   min-height: 0;
   padding: 8px;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: minmax(0, 2fr) minmax(0, 1fr);
   gap: 6px;
 }
 
-.section-title {
-  color: var(--muted);
-  letter-spacing: 0.02em;
-  line-height: 1.2;
+.minimal-content {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
 }
 
 .translation-card {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--card);
+  background: var(--window-card-primary, var(--card));
   padding: 8px;
   overflow: auto;
 }
@@ -74,4 +77,34 @@ body {
   word-break: break-word;
   line-height: 1.45;
   color: var(--text);
+}
+
+.history-card {
+  flex: 1 1 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--window-card-secondary, var(--card));
+  overflow: auto;
+}
+
+.history-item {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(153, 167, 194, 0.2);
+}
+
+.history-item:last-child {
+  border-bottom: 0;
+}
+
+.history-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.4;
+  color: var(--text);
+}
+
+.history-empty {
+  padding: 8px;
+  color: var(--muted);
 }

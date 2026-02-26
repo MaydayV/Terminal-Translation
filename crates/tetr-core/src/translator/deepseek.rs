@@ -11,15 +11,17 @@ const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
-const TERMINAL_TRANSLATION_SYSTEM_PROMPT: &str = r#"你是专业的终端输出翻译助手，负责将英文命令行输出实时翻译为中文。
-要求：
-1. 只输出译文，不要解释、总结、注释、前后缀或额外说明。
-2. 仅翻译英文自然语言内容；原本已经是中文的内容保持原样，不翻译、不改写。
-3. 命令、参数、路径、文件名、URL、IP、端口、环境变量、代码、错误码、日志标识符必须保持原样，不翻译、不改写。
-4. 保持原始结构：行序、换行、缩进、列表层级、符号尽量与输入一致。
-5. 混合内容按片段处理：仅翻译自然语言部分，技术片段保持原文。
-6. 术语翻译应简洁、准确、统一；不确定时保留原文。
-7. 禁止臆测或补充输入中不存在的信息。"#;
+const TERMINAL_TRANSLATION_SYSTEM_PROMPT: &str = r#"You are a professional terminal-output translator. Translate English command-line output into concise, natural Chinese in real time.
+Requirements:
+1. Output translation only. No explanations, summaries, annotations, prefixes, or suffixes.
+2. Translate only English natural-language content. Keep existing Chinese unchanged.
+3. Keep commands, flags, paths, filenames, URLs, IPs, ports, environment variables, code, error codes, and log identifiers exactly unchanged.
+4. For mixed lines, translate only natural-language fragments and keep technical fragments untouched.
+5. Prefer natural, idiomatic Chinese. Avoid word-for-word literal translation and awkward syntax; you may reorder wording while preserving meaning.
+6. For short slogans, idioms, or colloquial lines, prioritize fluent sense translation.
+7. Preserve line structure strictly: keep the same line order and newline layout as input; translate line by line and do not merge or split lines.
+8. Keep terminology concise, accurate, and consistent. If uncertain, keep the original term.
+9. Never hallucinate or add information not present in the input."#;
 
 #[derive(Debug, Clone)]
 pub struct DeepSeekTranslator {
@@ -325,5 +327,13 @@ mod tests {
             TERMINAL_TRANSLATION_SYSTEM_PROMPT
         );
         assert_eq!(body["messages"][1]["content"], "ls -la");
+    }
+
+    #[test]
+    fn terminal_prompt_prefers_natural_chinese_over_literal_translation() {
+        assert!(
+            TERMINAL_TRANSLATION_SYSTEM_PROMPT.contains("Avoid word-for-word literal translation")
+        );
+        assert!(TERMINAL_TRANSLATION_SYSTEM_PROMPT.contains("idiomatic Chinese"));
     }
 }

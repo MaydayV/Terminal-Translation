@@ -69,7 +69,13 @@ struct AppConfig {
     ui_bin: Option<String>,
     ui_history_enabled: Option<bool>,
     ui_source_enabled: Option<bool>,
+    ui_dock_icon: Option<bool>,
     ui_font_size: Option<u16>,
+    ui_bg_color: Option<String>,
+    ui_bg_opacity: Option<u8>,
+    ui_window_height: Option<u16>,
+    ui_realtime_height: Option<u16>,
+    ui_history_height: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -91,7 +97,13 @@ struct PersistedConfig {
     ui_bin: Option<String>,
     ui_history_enabled: Option<bool>,
     ui_source_enabled: Option<bool>,
+    ui_dock_icon: Option<bool>,
     ui_font_size: Option<u16>,
+    ui_bg_color: Option<String>,
+    ui_bg_opacity: Option<u8>,
+    ui_window_height: Option<u16>,
+    ui_realtime_height: Option<u16>,
+    ui_history_height: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -223,16 +235,23 @@ fn main() -> Result<()> {
 
     if !args.no_ui {
         match IpcServer::start() {
-            Ok(ipc) => match spawn_ui_process(ipc.port(), cfg.ui_bin.as_deref()) {
-                Ok(child) => {
-                    ui_child = Some(child);
-                    ipc.send_event("session.started", build_session_started_payload(&cfg));
-                    ipc_server = Some(ipc);
+            Ok(ipc) => {
+                match spawn_ui_process(
+                    ipc.port(),
+                    cfg.ui_bin.as_deref(),
+                    cfg.ui_window_height,
+                    cfg.ui_dock_icon,
+                ) {
+                    Ok(child) => {
+                        ui_child = Some(child);
+                        ipc.send_event("session.started", build_session_started_payload(&cfg));
+                        ipc_server = Some(ipc);
+                    }
+                    Err(err) => {
+                        eprintln!("[tetr] failed to spawn UI: {err}");
+                    }
                 }
-                Err(err) => {
-                    eprintln!("[tetr] failed to spawn UI: {err}");
-                }
-            },
+            }
             Err(err) => {
                 eprintln!("[tetr] failed to initialize UI IPC: {err}");
             }
@@ -384,7 +403,20 @@ impl AppConfig {
             read_env_bool(&["TETR_UI_HISTORY_ENABLED"]).or(file_cfg.ui_history_enabled);
         let ui_source_enabled =
             read_env_bool(&["TETR_UI_SOURCE_ENABLED"]).or(file_cfg.ui_source_enabled);
+        let ui_dock_icon = read_env_bool(&["TETR_UI_DOCK_ICON"]).or(file_cfg.ui_dock_icon);
         let ui_font_size = read_env_u16(&["TETR_UI_FONT_SIZE"]).or(file_cfg.ui_font_size);
+        let ui_bg_color = read_env_nonempty(&["TETR_UI_BG_COLOR"])
+            .and_then(|v| parse_ui_bg_color(&v))
+            .or(file_cfg.ui_bg_color.clone());
+        let ui_bg_opacity = read_env_nonempty(&["TETR_UI_BG_OPACITY"])
+            .and_then(|v| parse_ui_bg_opacity(&v))
+            .or(file_cfg.ui_bg_opacity);
+        let ui_window_height =
+            read_env_u16_height(&["TETR_UI_WINDOW_HEIGHT"]).or(file_cfg.ui_window_height);
+        let ui_realtime_height =
+            read_env_u16_height(&["TETR_UI_REALTIME_HEIGHT"]).or(file_cfg.ui_realtime_height);
+        let ui_history_height =
+            read_env_u16_height(&["TETR_UI_HISTORY_HEIGHT"]).or(file_cfg.ui_history_height);
 
         Ok(Self {
             provider,
@@ -399,7 +431,13 @@ impl AppConfig {
             ui_bin,
             ui_history_enabled,
             ui_source_enabled,
+            ui_dock_icon,
             ui_font_size,
+            ui_bg_color,
+            ui_bg_opacity,
+            ui_window_height,
+            ui_realtime_height,
+            ui_history_height,
         })
     }
 }
@@ -473,6 +511,10 @@ fn read_env_bool(keys: &[&str]) -> Option<bool> {
 
 fn read_env_u16(keys: &[&str]) -> Option<u16> {
     read_env_nonempty(keys).and_then(|v| parse_ui_font_size(&v))
+}
+
+fn read_env_u16_height(keys: &[&str]) -> Option<u16> {
+    read_env_nonempty(keys).and_then(|v| parse_ui_window_height(&v))
 }
 
 fn run_config_command(command: CliCommand) -> Result<()> {
@@ -604,13 +646,14 @@ fn run_config_wizard() -> Result<()> {
         println!("3) 设置当前 Provider 的接口地址");
         println!("4) 设置当前 Provider 的 API Key");
         println!("5) 设置 UI 默认显示项（记录/原文）");
-        println!("6) 设置 UI 字号（像素）");
-        println!("7) 设置触发空闲时间（毫秒）");
-        println!("8) 设置输出截断参数");
-        println!("9) 测试当前模型连通性");
-        println!("10) 查看当前配置");
-        println!("11) 清除一个配置项");
-        println!("12) 显示配置文件路径");
+        println!("6) 设置 UI 布局尺寸（总高度/实时翻译/记录）");
+        println!("7) 设置 UI 样式（字号/背景色/透明度）");
+        println!("8) 设置触发空闲时间（毫秒）");
+        println!("9) 设置输出截断参数");
+        println!("10) 测试当前模型连通性");
+        println!("11) 查看当前配置");
+        println!("12) 清除一个配置项");
+        println!("13) 显示配置文件路径");
         println!("0) 退出");
 
         let choice = prompt_line("请选择: ")?;
@@ -636,31 +679,35 @@ fn run_config_wizard() -> Result<()> {
                 save_persisted_config(&cfg)?;
             }
             "6" => {
-                configure_ui_font_size(&mut cfg)?;
+                configure_ui_heights(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
             "7" => {
-                configure_idle_ms(&mut cfg)?;
+                configure_ui_styles(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
             "8" => {
-                configure_truncation(&mut cfg)?;
+                configure_idle_ms(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
             "9" => {
-                run_config_connectivity_test()?;
+                configure_truncation(&mut cfg)?;
+                save_persisted_config(&cfg)?;
             }
             "10" => {
+                run_config_connectivity_test()?;
+            }
+            "11" => {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&masked_config_for_display(&cfg))?
                 );
             }
-            "11" => {
+            "12" => {
                 configure_unset_key(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
-            "12" => {
+            "13" => {
                 println!("配置文件: {}", config_file_path()?.display());
             }
             "0" | "q" | "quit" | "exit" => {
@@ -856,18 +903,114 @@ fn configure_ui_defaults(cfg: &mut PersistedConfig) -> Result<()> {
     Ok(())
 }
 
-fn configure_ui_font_size(cfg: &mut PersistedConfig) -> Result<()> {
-    let current = cfg
+fn configure_ui_styles(cfg: &mut PersistedConfig) -> Result<()> {
+    println!("设置 UI 样式（直接回车表示保持当前值）");
+
+    let dock_icon_current = cfg
+        .ui_dock_icon
+        .map(|v| {
+            if v {
+                "开".to_string()
+            } else {
+                "关".to_string()
+            }
+        })
+        .unwrap_or_else(|| "关(默认)".to_string());
+    let dock_icon_input = prompt_line(&format!(
+        "Dock 图标 ui_dock_icon [{dock_icon_current}]（开/关）: "
+    ))?;
+    if !dock_icon_input.is_empty() {
+        let parsed = parse_bool_value(&dock_icon_input)
+            .ok_or_else(|| anyhow!("ui_dock_icon 仅支持 开/关/是/否/on/off/true/false/1/0"))?;
+        cfg.ui_dock_icon = Some(parsed);
+    }
+
+    let font_current = cfg
         .ui_font_size
         .map(|v| v.to_string())
         .unwrap_or_else(|| "11(默认)".to_string());
-    let value = prompt_line(&format!("翻译窗口字号像素 [{current}]（建议 9-22）: "))?;
-    if value.is_empty() {
-        return Ok(());
+    let font_input = prompt_line(&format!(
+        "字号 ui_font_size [{font_current}]（建议 9-22）: "
+    ))?;
+    if !font_input.is_empty() {
+        let parsed =
+            parse_ui_font_size(&font_input).ok_or_else(|| anyhow!("字号仅支持 9-22 的整数"))?;
+        cfg.ui_font_size = Some(parsed);
     }
-    let size = parse_ui_font_size(&value).ok_or_else(|| anyhow!("字号仅支持 9-22 的整数"))?;
-    cfg.ui_font_size = Some(size);
-    println!("已设置 ui_font_size = {size}");
+
+    let bg_current = cfg
+        .ui_bg_color
+        .clone()
+        .unwrap_or_else(|| "#121b2d(默认)".to_string());
+    let bg_input = prompt_line(&format!(
+        "背景色 ui_bg_color [{bg_current}]（HEX，如 #121b2d）: "
+    ))?;
+    if !bg_input.is_empty() {
+        let parsed = parse_ui_bg_color(&bg_input)
+            .ok_or_else(|| anyhow!("ui_bg_color 仅支持 HEX 颜色，如 #121b2d 或 #abc"))?;
+        cfg.ui_bg_color = Some(parsed);
+    }
+
+    let opacity_current = cfg
+        .ui_bg_opacity
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "100(默认)".to_string());
+    let opacity_input = prompt_line(&format!(
+        "背景透明度 ui_bg_opacity [{opacity_current}]（0-100）: "
+    ))?;
+    if !opacity_input.is_empty() {
+        let parsed = parse_ui_bg_opacity(&opacity_input)
+            .ok_or_else(|| anyhow!("ui_bg_opacity 仅支持 0-100 的整数"))?;
+        cfg.ui_bg_opacity = Some(parsed);
+    }
+
+    println!("UI 样式配置已更新");
+    Ok(())
+}
+
+fn configure_ui_heights(cfg: &mut PersistedConfig) -> Result<()> {
+    println!("设置 UI 高度（像素，直接回车表示保持当前值）");
+
+    let window_current = cfg
+        .ui_window_height
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "自动(默认)".to_string());
+    let window_input = prompt_line(&format!(
+        "窗口总高度 ui_window_height [{window_current}]（建议 80-900）: "
+    ))?;
+    if !window_input.is_empty() {
+        let parsed = parse_ui_window_height(&window_input)
+            .ok_or_else(|| anyhow!("ui_window_height 仅支持 80-900 的整数"))?;
+        cfg.ui_window_height = Some(parsed);
+    }
+
+    let realtime_current = cfg
+        .ui_realtime_height
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "自动(默认)".to_string());
+    let realtime_input = prompt_line(&format!(
+        "实时翻译区高度 ui_realtime_height [{realtime_current}]（建议 80-900）: "
+    ))?;
+    if !realtime_input.is_empty() {
+        let parsed = parse_ui_window_height(&realtime_input)
+            .ok_or_else(|| anyhow!("ui_realtime_height 仅支持 80-900 的整数"))?;
+        cfg.ui_realtime_height = Some(parsed);
+    }
+
+    let history_current = cfg
+        .ui_history_height
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "自动(默认)".to_string());
+    let history_input = prompt_line(&format!(
+        "记录区高度 ui_history_height [{history_current}]（建议 80-900）: "
+    ))?;
+    if !history_input.is_empty() {
+        let parsed = parse_ui_window_height(&history_input)
+            .ok_or_else(|| anyhow!("ui_history_height 仅支持 80-900 的整数"))?;
+        cfg.ui_history_height = Some(parsed);
+    }
+
+    println!("UI 高度配置已更新");
     Ok(())
 }
 
@@ -993,10 +1136,46 @@ fn set_config_value(cfg: &mut PersistedConfig, key: &str, value: &str) -> Result
                 anyhow!("ui_source_enabled 仅支持 开/关/是/否/on/off/true/false/1/0")
             })?)
         }
+        "ui_dock_icon" => {
+            cfg.ui_dock_icon =
+                Some(parse_bool_value(value).ok_or_else(|| {
+                    anyhow!("ui_dock_icon 仅支持 开/关/是/否/on/off/true/false/1/0")
+                })?)
+        }
         "ui_font_size" | "ui_font_size_px" => {
             cfg.ui_font_size = Some(
                 parse_ui_font_size(value)
                     .ok_or_else(|| anyhow!("ui_font_size 仅支持 9-22 的整数"))?,
+            )
+        }
+        "ui_bg_color" | "ui_background_color" => {
+            cfg.ui_bg_color = Some(
+                parse_ui_bg_color(value)
+                    .ok_or_else(|| anyhow!("ui_bg_color 仅支持 HEX 颜色，如 #121b2d 或 #abc"))?,
+            )
+        }
+        "ui_bg_opacity" | "ui_background_opacity" => {
+            cfg.ui_bg_opacity = Some(
+                parse_ui_bg_opacity(value)
+                    .ok_or_else(|| anyhow!("ui_bg_opacity 仅支持 0-100 的整数"))?,
+            )
+        }
+        "ui_window_height" | "ui_window_height_px" => {
+            cfg.ui_window_height = Some(
+                parse_ui_window_height(value)
+                    .ok_or_else(|| anyhow!("ui_window_height 仅支持 80-900 的整数"))?,
+            )
+        }
+        "ui_realtime_height" | "ui_realtime_height_px" => {
+            cfg.ui_realtime_height = Some(
+                parse_ui_window_height(value)
+                    .ok_or_else(|| anyhow!("ui_realtime_height 仅支持 80-900 的整数"))?,
+            )
+        }
+        "ui_history_height" | "ui_history_height_px" => {
+            cfg.ui_history_height = Some(
+                parse_ui_window_height(value)
+                    .ok_or_else(|| anyhow!("ui_history_height 仅支持 80-900 的整数"))?,
             )
         }
         _ => {
@@ -1030,7 +1209,13 @@ fn unset_config_value(cfg: &mut PersistedConfig, key: &str) -> Result<()> {
         "ui_bin" => cfg.ui_bin = None,
         "ui_history_enabled" => cfg.ui_history_enabled = None,
         "ui_source_enabled" => cfg.ui_source_enabled = None,
+        "ui_dock_icon" => cfg.ui_dock_icon = None,
         "ui_font_size" | "ui_font_size_px" => cfg.ui_font_size = None,
+        "ui_bg_color" | "ui_background_color" => cfg.ui_bg_color = None,
+        "ui_bg_opacity" | "ui_background_opacity" => cfg.ui_bg_opacity = None,
+        "ui_window_height" | "ui_window_height_px" => cfg.ui_window_height = None,
+        "ui_realtime_height" | "ui_realtime_height_px" => cfg.ui_realtime_height = None,
+        "ui_history_height" | "ui_history_height_px" => cfg.ui_history_height = None,
         _ => {
             return Err(anyhow!(
                 "不支持的配置键: {key}。可用键: {}",
@@ -1061,7 +1246,17 @@ fn get_config_value(cfg: &PersistedConfig, key: &str) -> Result<Option<String>> 
         "ui_bin" => cfg.ui_bin.clone(),
         "ui_history_enabled" => cfg.ui_history_enabled.map(|v| v.to_string()),
         "ui_source_enabled" => cfg.ui_source_enabled.map(|v| v.to_string()),
+        "ui_dock_icon" => cfg.ui_dock_icon.map(|v| v.to_string()),
         "ui_font_size" | "ui_font_size_px" => cfg.ui_font_size.map(|v| v.to_string()),
+        "ui_bg_color" | "ui_background_color" => cfg.ui_bg_color.clone(),
+        "ui_bg_opacity" | "ui_background_opacity" => cfg.ui_bg_opacity.map(|v| v.to_string()),
+        "ui_window_height" | "ui_window_height_px" => cfg.ui_window_height.map(|v| v.to_string()),
+        "ui_realtime_height" | "ui_realtime_height_px" => {
+            cfg.ui_realtime_height.map(|v| v.to_string())
+        }
+        "ui_history_height" | "ui_history_height_px" => {
+            cfg.ui_history_height.map(|v| v.to_string())
+        }
         _ => {
             return Err(anyhow!(
                 "不支持的配置键: {key}。可用键: {}",
@@ -1106,7 +1301,13 @@ fn masked_config_for_display(cfg: &PersistedConfig) -> serde_json::Value {
         "ui_bin": cfg.ui_bin,
         "ui_history_enabled": cfg.ui_history_enabled,
         "ui_source_enabled": cfg.ui_source_enabled,
+        "ui_dock_icon": cfg.ui_dock_icon,
         "ui_font_size": cfg.ui_font_size,
+        "ui_bg_color": cfg.ui_bg_color,
+        "ui_bg_opacity": cfg.ui_bg_opacity,
+        "ui_window_height": cfg.ui_window_height,
+        "ui_realtime_height": cfg.ui_realtime_height,
+        "ui_history_height": cfg.ui_history_height,
     })
 }
 
@@ -1129,7 +1330,13 @@ fn supported_config_keys() -> Vec<&'static str> {
         "ui_bin",
         "ui_history_enabled",
         "ui_source_enabled",
+        "ui_dock_icon",
         "ui_font_size",
+        "ui_bg_color",
+        "ui_bg_opacity",
+        "ui_window_height",
+        "ui_realtime_height",
+        "ui_history_height",
     ]
 }
 
@@ -1183,16 +1390,17 @@ fn process_triggered_capture(
     match translator.stream_translate(&truncated.text, &mut emit_delta) {
         Ok(mut meta) => {
             meta.truncated = truncated.truncated;
+            let aligned_translation = align_translation_line_layout(&truncated.text, &assembled);
             if let Some(ipc) = ipc {
                 ipc.send_event(
                     "translation.done",
                     json!({
-                        "translation": assembled,
+                        "translation": aligned_translation,
                         "meta": meta,
                     }),
                 );
             } else {
-                eprintln!("\n[tetr][translation]\n{}\n", assembled);
+                eprintln!("\n[tetr][translation]\n{}\n", aligned_translation);
             }
         }
         Err(err) => {
@@ -1249,11 +1457,184 @@ fn build_session_started_payload(cfg: &AppConfig) -> Value {
     if let Some(font_size) = cfg.ui_font_size {
         payload.insert("uiFontSizePx".to_string(), json!(font_size));
     }
+    if let Some(bg_color) = cfg.ui_bg_color.as_ref() {
+        payload.insert("uiBgColor".to_string(), json!(bg_color));
+    }
+    if let Some(bg_opacity) = cfg.ui_bg_opacity {
+        payload.insert("uiBgOpacityPercent".to_string(), json!(bg_opacity));
+    }
+    if let Some(height) = cfg.ui_window_height {
+        payload.insert("uiWindowHeightPx".to_string(), json!(height));
+    }
+    if let Some(height) = cfg.ui_realtime_height {
+        payload.insert("uiRealtimeHeightPx".to_string(), json!(height));
+    }
+    if let Some(height) = cfg.ui_history_height {
+        payload.insert("uiHistoryHeightPx".to_string(), json!(height));
+    }
     Value::Object(payload)
 }
 
 fn should_translate_text(input: &str) -> bool {
     input.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+fn align_translation_line_layout(source: &str, translation: &str) -> String {
+    let source_lines: Vec<String> = source
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    let translation_lines: Vec<String> = translation
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    if source_lines.len() <= 1 || translation_lines.is_empty() {
+        return translation.trim().to_string();
+    }
+
+    if translation_lines.len() < source_lines.len() {
+        let merged = translation_lines.join(" ");
+        return split_single_line_by_source_weights(&merged, &source_lines).join("\n");
+    }
+
+    if translation_lines.len() == source_lines.len() {
+        return translation_lines.join("\n");
+    }
+
+    if translation_lines.len() > source_lines.len() {
+        let rows = bucketize_lines(&translation_lines, source_lines.len())
+            .into_iter()
+            .map(|bucket| bucket.join(" ").trim().to_string())
+            .collect::<Vec<String>>();
+        return rows.join("\n");
+    }
+
+    split_single_line_by_source_weights(&translation_lines[0], &source_lines).join("\n")
+}
+
+fn bucketize_lines(items: &[String], bucket_count: usize) -> Vec<Vec<String>> {
+    let mut buckets = vec![Vec::new(); bucket_count];
+    if bucket_count == 0 || items.is_empty() {
+        return buckets;
+    }
+
+    for (index, item) in items.iter().enumerate() {
+        let bucket_index = ((index * bucket_count) / items.len()).min(bucket_count - 1);
+        buckets[bucket_index].push(item.clone());
+    }
+
+    buckets
+}
+
+fn split_single_line_by_source_weights(text: &str, source_lines: &[String]) -> Vec<String> {
+    if source_lines.is_empty() {
+        return vec![text.trim().to_string()];
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new(); source_lines.len()];
+    }
+
+    let weights: Vec<usize> = source_lines
+        .iter()
+        .map(|line| line.chars().count().max(1))
+        .collect();
+    let mut remaining_weight: usize = weights.iter().sum();
+    let mut cursor = 0usize;
+    let mut result: Vec<String> = Vec::with_capacity(source_lines.len());
+
+    for (idx, weight) in weights.iter().enumerate() {
+        if idx == weights.len() - 1 {
+            let tail: String = chars[cursor..].iter().collect();
+            result.push(tail.trim().to_string());
+            break;
+        }
+
+        let remaining_chars = chars.len().saturating_sub(cursor);
+        let lines_left_after = weights.len().saturating_sub(idx + 1);
+        if remaining_chars <= lines_left_after {
+            let one_char = chars
+                .get(cursor)
+                .copied()
+                .map(|ch| ch.to_string())
+                .unwrap_or_default();
+            result.push(one_char.trim().to_string());
+            cursor = (cursor + 1).min(chars.len());
+            remaining_weight = remaining_weight.saturating_sub(*weight);
+            continue;
+        }
+
+        let desired_len = ((remaining_chars as f64) * (*weight as f64 / remaining_weight as f64))
+            .round() as usize;
+        let max_len = remaining_chars - lines_left_after;
+        let target_len = desired_len.clamp(1, max_len);
+        let split_at = find_nearest_split_index(&chars, cursor, cursor + target_len);
+
+        let piece: String = chars[cursor..split_at].iter().collect();
+        result.push(piece.trim().to_string());
+        cursor = split_at;
+        remaining_weight = remaining_weight.saturating_sub(*weight);
+    }
+
+    while result.len() < source_lines.len() {
+        result.push(String::new());
+    }
+
+    result
+}
+
+fn find_nearest_split_index(chars: &[char], start: usize, desired: usize) -> usize {
+    if desired >= chars.len() {
+        return chars.len();
+    }
+
+    let desired = desired.max(start + 1);
+    const WINDOW: usize = 8;
+
+    for offset in 0..=WINDOW {
+        let right = desired.saturating_add(offset);
+        if right < chars.len() && right > start && is_split_boundary(chars[right - 1]) {
+            return right;
+        }
+
+        let left = desired.saturating_sub(offset);
+        if left > start && left < chars.len() && is_split_boundary(chars[left - 1]) {
+            return left;
+        }
+    }
+
+    desired.min(chars.len())
+}
+
+fn is_split_boundary(ch: char) -> bool {
+    matches!(
+        ch,
+        ' ' | '\t'
+            | ','
+            | '.'
+            | '!'
+            | '?'
+            | ';'
+            | ':'
+            | '，'
+            | '。'
+            | '！'
+            | '？'
+            | '；'
+            | '：'
+            | '、'
+    )
 }
 
 fn parse_bool_value(value: &str) -> Option<bool> {
@@ -1269,6 +1650,61 @@ fn parse_bool_value(value: &str) -> Option<bool> {
 fn parse_ui_font_size(value: &str) -> Option<u16> {
     let parsed = value.trim().parse::<u16>().ok()?;
     if (9..=22).contains(&parsed) {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+fn parse_ui_bg_color(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let with_hash = if trimmed.starts_with('#') {
+        trimmed.to_string()
+    } else {
+        format!("#{trimmed}")
+    };
+
+    let raw = with_hash.strip_prefix('#')?;
+    let normalized = match raw.len() {
+        3 => {
+            if !raw.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return None;
+            }
+            let mut expanded = String::with_capacity(6);
+            for ch in raw.chars() {
+                expanded.push(ch);
+                expanded.push(ch);
+            }
+            expanded
+        }
+        6 => {
+            if !raw.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return None;
+            }
+            raw.to_string()
+        }
+        _ => return None,
+    };
+
+    Some(format!("#{}", normalized.to_ascii_lowercase()))
+}
+
+fn parse_ui_bg_opacity(value: &str) -> Option<u8> {
+    let parsed = value.trim().parse::<u8>().ok()?;
+    if parsed <= 100 {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+fn parse_ui_window_height(value: &str) -> Option<u16> {
+    let parsed = value.trim().parse::<u16>().ok()?;
+    if (80..=900).contains(&parsed) {
         Some(parsed)
     } else {
         None
@@ -1325,7 +1761,12 @@ fn ui_binary_name() -> &'static str {
     }
 }
 
-fn spawn_ui_process(port: u16, configured_ui_bin: Option<&str>) -> Result<Child> {
+fn spawn_ui_process(
+    port: u16,
+    configured_ui_bin: Option<&str>,
+    ui_window_height: Option<u16>,
+    ui_dock_icon: Option<bool>,
+) -> Result<Child> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Some(path) = configured_ui_bin {
@@ -1346,8 +1787,17 @@ fn spawn_ui_process(port: u16, configured_ui_bin: Option<&str>) -> Result<Child>
 
     for candidate in candidates {
         let mut command = Command::new(&candidate);
+        command.env("TETR_IPC_PORT", port.to_string());
+        if let Some(height) = ui_window_height {
+            command.env("TETR_UI_WINDOW_HEIGHT", height.to_string());
+        }
+        if let Some(dock_icon_enabled) = ui_dock_icon {
+            command.env(
+                "TETR_UI_DOCK_ICON",
+                if dock_icon_enabled { "1" } else { "0" },
+            );
+        }
         command
-            .env("TETR_IPC_PORT", port.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -1365,9 +1815,11 @@ fn spawn_ui_process(port: u16, configured_ui_bin: Option<&str>) -> Result<Child>
 #[cfg(test)]
 mod tests {
     use super::{
-        build_session_started_payload, build_translation_started_payload, parse_bool_value,
-        parse_ui_font_size, run_connectivity_probe, set_config_value, should_translate_text,
-        supported_config_keys, AppConfig, PersistedConfig, TriggerReason,
+        align_translation_line_layout, build_session_started_payload,
+        build_translation_started_payload, parse_bool_value, parse_ui_bg_color,
+        parse_ui_bg_opacity, parse_ui_font_size, parse_ui_window_height, run_connectivity_probe,
+        set_config_value, should_translate_text, supported_config_keys, AppConfig, PersistedConfig,
+        TriggerReason,
     };
     use tetr_core::translator::mock::MockTranslator;
     use tetr_core::translator::{TranslateError, TranslationMeta, Translator};
@@ -1417,6 +1869,30 @@ mod tests {
     }
 
     #[test]
+    fn aligns_translation_line_count_with_source_when_model_merges_lines() {
+        let source = "line one\nline two\nline three";
+        let translation = "第一行的翻译第二行的翻译第三行的翻译";
+
+        let aligned = align_translation_line_layout(source, translation);
+        let aligned_lines: Vec<&str> = aligned.split('\n').collect();
+
+        assert_eq!(aligned_lines.len(), 3);
+        assert_eq!(aligned.replace('\n', ""), translation);
+    }
+
+    #[test]
+    fn aligns_multi_line_translation_into_source_layout() {
+        let source = "a\nb\nc\nd";
+        let translation = "甲\n乙";
+
+        let aligned = align_translation_line_layout(source, translation);
+        let aligned_lines: Vec<&str> = aligned.split('\n').collect();
+
+        assert_eq!(aligned_lines.len(), 4);
+        assert_eq!(aligned.replace('\n', ""), "甲乙");
+    }
+
+    #[test]
     fn parses_boolean_values_for_config() {
         assert_eq!(parse_bool_value("on"), Some(true));
         assert_eq!(parse_bool_value("false"), Some(false));
@@ -1448,6 +1924,67 @@ mod tests {
     }
 
     #[test]
+    fn parses_ui_window_height_with_bounds() {
+        assert_eq!(parse_ui_window_height("220"), Some(220));
+        assert_eq!(parse_ui_window_height("900"), Some(900));
+        assert_eq!(parse_ui_window_height("70"), None);
+        assert_eq!(parse_ui_window_height("1200"), None);
+    }
+
+    #[test]
+    fn parses_ui_background_color_hex() {
+        assert_eq!(parse_ui_bg_color("#112233"), Some("#112233".to_string()));
+        assert_eq!(parse_ui_bg_color("abc"), Some("#aabbcc".to_string()));
+        assert_eq!(parse_ui_bg_color("#xyz"), None);
+    }
+
+    #[test]
+    fn parses_ui_background_opacity() {
+        assert_eq!(parse_ui_bg_opacity("0"), Some(0));
+        assert_eq!(parse_ui_bg_opacity("80"), Some(80));
+        assert_eq!(parse_ui_bg_opacity("100"), Some(100));
+        assert_eq!(parse_ui_bg_opacity("101"), None);
+    }
+
+    #[test]
+    fn supports_ui_height_config_keys() {
+        let mut cfg = PersistedConfig::default();
+        set_config_value(&mut cfg, "ui_window_height", "260").expect("set should succeed");
+        set_config_value(&mut cfg, "ui_realtime_height", "180").expect("set should succeed");
+        set_config_value(&mut cfg, "ui_history_height", "120").expect("set should succeed");
+
+        assert_eq!(cfg.ui_window_height, Some(260));
+        assert_eq!(cfg.ui_realtime_height, Some(180));
+        assert_eq!(cfg.ui_history_height, Some(120));
+        assert!(supported_config_keys().contains(&"ui_window_height"));
+        assert!(supported_config_keys().contains(&"ui_realtime_height"));
+        assert!(supported_config_keys().contains(&"ui_history_height"));
+    }
+
+    #[test]
+    fn supports_ui_style_config_keys() {
+        let mut cfg = PersistedConfig::default();
+        set_config_value(&mut cfg, "ui_bg_color", "#123456").expect("set should succeed");
+        set_config_value(&mut cfg, "ui_bg_opacity", "82").expect("set should succeed");
+
+        assert_eq!(cfg.ui_bg_color.as_deref(), Some("#123456"));
+        assert_eq!(cfg.ui_bg_opacity, Some(82));
+        assert!(supported_config_keys().contains(&"ui_bg_color"));
+        assert!(supported_config_keys().contains(&"ui_bg_opacity"));
+    }
+
+    #[test]
+    fn supports_ui_dock_icon_config_key() {
+        let mut cfg = PersistedConfig::default();
+        set_config_value(&mut cfg, "ui_dock_icon", "on").expect("set should succeed");
+        assert_eq!(cfg.ui_dock_icon, Some(true));
+
+        set_config_value(&mut cfg, "ui_dock_icon", "off").expect("set should succeed");
+        assert_eq!(cfg.ui_dock_icon, Some(false));
+        assert!(supported_config_keys().contains(&"ui_dock_icon"));
+    }
+
+    #[test]
     fn session_started_payload_includes_ui_font_size() {
         let cfg = AppConfig {
             provider: "openai-compatible".to_string(),
@@ -1462,13 +1999,39 @@ mod tests {
             ui_bin: None,
             ui_history_enabled: None,
             ui_source_enabled: None,
+            ui_dock_icon: Some(false),
             ui_font_size: Some(10),
+            ui_bg_color: Some("#123456".to_string()),
+            ui_bg_opacity: Some(82),
+            ui_window_height: Some(300),
+            ui_realtime_height: Some(180),
+            ui_history_height: Some(110),
         };
 
         let payload = build_session_started_payload(&cfg);
         assert_eq!(
             payload.get("uiFontSizePx").and_then(|v| v.as_u64()),
             Some(10)
+        );
+        assert_eq!(
+            payload.get("uiBgColor").and_then(|v| v.as_str()),
+            Some("#123456")
+        );
+        assert_eq!(
+            payload.get("uiBgOpacityPercent").and_then(|v| v.as_u64()),
+            Some(82)
+        );
+        assert_eq!(
+            payload.get("uiWindowHeightPx").and_then(|v| v.as_u64()),
+            Some(300)
+        );
+        assert_eq!(
+            payload.get("uiRealtimeHeightPx").and_then(|v| v.as_u64()),
+            Some(180)
+        );
+        assert_eq!(
+            payload.get("uiHistoryHeightPx").and_then(|v| v.as_u64()),
+            Some(110)
         );
     }
 
