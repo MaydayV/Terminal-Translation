@@ -97,13 +97,19 @@ impl CaptureState {
                 continue;
             }
 
-            if matches!(self.mode, CaptureMode::Exec | CaptureMode::Filter)
-                && self.prompt_regex.is_match(&normalized_line)
-            {
+            let is_prompt = self.prompt_regex.is_match(&normalized_line);
+
+            if matches!(self.mode, CaptureMode::Exec | CaptureMode::Filter) && is_prompt {
                 return self.emit(TriggerReason::Prompt);
             }
 
-            if !matches!(self.mode, CaptureMode::Exec | CaptureMode::Filter) {
+            // Fallback: if command capture failed, still capture output between prompts.
+            if matches!(self.mode, CaptureMode::Idle) && !is_prompt {
+                self.mode = CaptureMode::Filter;
+                self.command_echo_skipped = true;
+            }
+
+            if !matches!(self.mode, CaptureMode::Exec | CaptureMode::Filter) || is_prompt {
                 continue;
             }
 
@@ -146,7 +152,9 @@ impl CaptureState {
     }
 
     fn emit(&mut self, reason: TriggerReason) -> Option<TriggeredCapture> {
-        let text = self.lines.join("\n").trim().to_string();
+        let mut lines = self.lines.clone();
+        trim_trailing_prompt_noise(&mut lines);
+        let text = lines.join("\n").trim().to_string();
 
         self.mode = CaptureMode::Idle;
         self.pending_command = None;
@@ -164,6 +172,48 @@ impl CaptureState {
 
 fn normalize_shell_text(line: &str) -> String {
     line.trim_end_matches('\r').trim().to_string()
+}
+
+fn trim_trailing_prompt_noise(lines: &mut Vec<String>) {
+    while let Some(last) = lines.last() {
+        let trimmed = last.trim();
+        if trimmed.is_empty() {
+            lines.pop();
+            continue;
+        }
+
+        if looks_like_prompt_header(trimmed)
+            || looks_like_prompt_symbol_line(trimmed)
+            || looks_like_prompt_decoration(trimmed)
+        {
+            lines.pop();
+            continue;
+        }
+
+        break;
+    }
+}
+
+fn looks_like_prompt_header(line: &str) -> bool {
+    line.contains(" at ")
+        && line.contains(':')
+        && line.chars().filter(|c| c.is_ascii_digit()).count() >= 4
+}
+
+fn looks_like_prompt_symbol_line(line: &str) -> bool {
+    line.len() <= 2
+        && line
+            .chars()
+            .all(|c| matches!(c, '%' | '~' | '$' | '#' | '>' | '❯'))
+}
+
+fn looks_like_prompt_decoration(line: &str) -> bool {
+    if line.len() < 8 {
+        return false;
+    }
+    let alnum = line.chars().filter(|c| c.is_ascii_alphanumeric()).count();
+    let has_dots = line.contains('·') || line.contains("...");
+    has_dots && alnum <= 2
 }
 
 #[cfg(test)]
@@ -281,5 +331,41 @@ mod tests {
         state.note_user_command("\n");
         let triggered = state.ingest_chunk("$ ", "$ ", start);
         assert_eq!(triggered, None);
+    }
+
+    #[test]
+    fn falls_back_to_capture_without_command_echo_tracking() {
+        let start = Instant::now();
+        let mut state = CaptureState::new(300);
+
+        let triggered = state.ingest_chunk("hello\n$ ", "hello\n$ ", start);
+        assert_eq!(
+            triggered,
+            Some(TriggeredCapture {
+                text: "hello".to_string(),
+                reason: TriggerReason::Prompt,
+            })
+        );
+    }
+
+    #[test]
+    fn strips_prompt_noise_lines_from_tail() {
+        let start = Instant::now();
+        let mut state = CaptureState::new(300);
+
+        state.note_user_command("curl -s https://api.github.com/zen");
+        let triggered = state.ingest_chunk(
+            "curl -s https://api.github.com/zen\nSpeak like a human.\n%\n~ ........ at 17:50:50\n❯ ",
+            "curl -s https://api.github.com/zen\nSpeak like a human.\n%\n~ ........ at 17:50:50\n❯ ",
+            start,
+        );
+
+        assert_eq!(
+            triggered,
+            Some(TriggeredCapture {
+                text: "Speak like a human.".to_string(),
+                reason: TriggerReason::Prompt,
+            })
+        );
     }
 }

@@ -972,15 +972,14 @@ fn process_triggered_capture(
     }
 
     if let Some(ipc) = ipc {
-        ipc.send_event(
-            "translation.started",
-            json!({
-                "reason": trigger_reason_text(triggered.reason),
-                "truncated": truncated.truncated,
-                "originalChars": truncated.original_chars,
-                "selectedChars": truncated.text.chars().count(),
-            }),
+        let started_payload = build_translation_started_payload(
+            triggered.reason,
+            truncated.truncated,
+            truncated.original_chars,
+            truncated.text.chars().count(),
+            &truncated.text,
         );
+        ipc.send_event("translation.started", started_payload);
     }
 
     let mut assembled = String::new();
@@ -1030,6 +1029,22 @@ fn trigger_reason_text(reason: TriggerReason) -> &'static str {
         TriggerReason::Prompt => "prompt",
         TriggerReason::Idle => "idle",
     }
+}
+
+fn build_translation_started_payload(
+    reason: TriggerReason,
+    truncated: bool,
+    original_chars: usize,
+    selected_chars: usize,
+    source: &str,
+) -> Value {
+    json!({
+        "reason": trigger_reason_text(reason),
+        "truncated": truncated,
+        "originalChars": original_chars,
+        "selectedChars": selected_chars,
+        "source": source,
+    })
 }
 
 fn detect_terminal_size() -> (u16, u16) {
@@ -1117,4 +1132,27 @@ fn spawn_ui_process(port: u16, configured_ui_bin: Option<&str>) -> Result<Child>
     Err(anyhow!(
         "unable to launch UI binary. set TETR_UI_BIN to the tetr-ui executable path"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_translation_started_payload, TriggerReason};
+
+    #[test]
+    fn translation_started_payload_includes_source_excerpt() {
+        let payload =
+            build_translation_started_payload(TriggerReason::Prompt, true, 3200, 540, "line1\nline2");
+
+        assert_eq!(payload.get("reason").and_then(|v| v.as_str()), Some("prompt"));
+        assert_eq!(payload.get("truncated").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            payload.get("originalChars").and_then(|v| v.as_u64()),
+            Some(3200)
+        );
+        assert_eq!(
+            payload.get("selectedChars").and_then(|v| v.as_u64()),
+            Some(540)
+        );
+        assert_eq!(payload.get("source").and_then(|v| v.as_str()), Some("line1\nline2"));
+    }
 }

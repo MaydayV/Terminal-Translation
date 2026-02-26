@@ -13,6 +13,10 @@ serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }
 
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
 core-graphics = "0.24"

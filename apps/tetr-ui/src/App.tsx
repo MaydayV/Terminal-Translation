@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type TranslationEntry = {
@@ -11,115 +10,158 @@ type TranslationEntry = {
   inputChars?: number;
 };
 
-type SessionStartedPayload = {
-  provider?: string;
-};
-
 type DonePayload = {
   translation?: string;
 };
+
+type UiEnvelope = {
+  event: string;
+  payload?: any;
+};
+
+const HISTORY_STORAGE_KEY = "tetr.ui.history.enabled";
+const HISTORY_DEFAULT_ENABLED = true; // Debug default: keep history open for now.
 
 export default function App() {
   const [entries, setEntries] = useState<TranslationEntry[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [status, setStatus] = useState("等待会话...");
-  const [provider, setProvider] = useState("-");
+  const [historyEnabled, setHistoryEnabled] = useState<boolean>(() => {
+    try {
+      const stored = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+      if (stored === null) {
+        return HISTORY_DEFAULT_ENABLED;
+      }
+      return stored === "1";
+    } catch {
+      return HISTORY_DEFAULT_ENABLED;
+    }
+  });
   const activeIdRef = useRef<number | null>(null);
+  const readySentRef = useRef(false);
 
   useEffect(() => {
-    const unsubs: Promise<UnlistenFn>[] = [];
+    let pollTimer: number | undefined;
+    let inFlight = false;
+    let stopped = false;
 
-    unsubs.push(
-      listen<SessionStartedPayload>("session.started", (event) => {
-        setProvider(event.payload?.provider ?? "-");
-        setStatus("会话已启动");
-      })
-    );
+    const applyEnvelope = (envelope: UiEnvelope) => {
+      const payload = envelope.payload ?? {};
 
-    unsubs.push(
-      listen<{ reason?: string; selectedChars?: number }>(
-        "translation.started",
-        (event) => {
+      switch (envelope.event) {
+        case "session.started": {
+          setStatus("会话已启动");
+          break;
+        }
+        case "translation.started": {
+          const data = payload as { reason?: string; selectedChars?: number };
           const id = Date.now();
           activeIdRef.current = id;
           setActiveId(id);
           setEntries((prev) => [
             {
               id,
-              reason: event.payload?.reason ?? "unknown",
+              reason: data.reason ?? "unknown",
               text: "",
               done: false,
               startedAt: Date.now(),
-              inputChars: event.payload?.selectedChars,
+              inputChars: data.selectedChars,
             },
             ...prev,
           ]);
           setStatus("翻译中...");
+          break;
         }
-      )
-    );
+        case "translation.delta": {
+          const delta = (payload as { delta?: string }).delta ?? "";
+          const currentId = activeIdRef.current;
+          if (!delta || currentId === null) {
+            break;
+          }
 
-    unsubs.push(
-      listen<{ delta?: string }>("translation.delta", (event) => {
-        const delta = event.payload?.delta ?? "";
-        const currentId = activeIdRef.current;
-        if (!delta || currentId === null) {
-          return;
+          setEntries((prev) =>
+            prev.map((entry) =>
+              entry.id === currentId
+                ? { ...entry, text: `${entry.text}${delta}` }
+                : entry
+            )
+          );
+          break;
         }
+        case "translation.done": {
+          const currentId = activeIdRef.current;
+          if (currentId === null) {
+            break;
+          }
 
-        setEntries((prev) =>
-          prev.map((entry) =>
-            entry.id === currentId
-              ? { ...entry, text: `${entry.text}${delta}` }
-              : entry
-          )
-        );
-      })
-    );
+          const data = payload as DonePayload;
+          const translation = data.translation;
+          setEntries((prev) =>
+            prev.map((entry) => {
+              if (entry.id !== currentId) {
+                return entry;
+              }
 
-    unsubs.push(
-      listen<DonePayload>("translation.done", (event) => {
-        const currentId = activeIdRef.current;
-        if (currentId === null) {
-          return;
+              return {
+                ...entry,
+                text: translation ?? entry.text,
+                done: true,
+              };
+            })
+          );
+          activeIdRef.current = null;
+          setStatus("已完成");
+          break;
         }
+        case "session.error": {
+          const message = (payload as { message?: string }).message ?? "unknown";
+          setStatus(`错误: ${message}`);
+          break;
+        }
+        case "session.stopped": {
+          setStatus("会话已停止");
+          break;
+        }
+        default:
+          break;
+      }
+    };
 
-        const translation = event.payload?.translation;
-        setEntries((prev) =>
-          prev.map((entry) => {
-            if (entry.id !== currentId) {
-              return entry;
-            }
+    const poll = async () => {
+      if (stopped || inFlight) {
+        return;
+      }
 
-            return {
-              ...entry,
-              text: translation ?? entry.text,
-              done: true,
-            };
-          })
-        );
+      inFlight = true;
+      try {
+        const events = await invoke<UiEnvelope[]>("drain_events");
+        for (const envelope of events) {
+          applyEnvelope(envelope);
+        }
+      } catch (error) {
+        console.warn("[tetr-ui] drain_events failed", error);
+      } finally {
+        inFlight = false;
+      }
+    };
 
-        activeIdRef.current = null;
-        setStatus("已完成");
-      })
-    );
+    if (!readySentRef.current) {
+      readySentRef.current = true;
+      void invoke("frontend_ready").catch(() => {
+        setStatus("错误: 前端握手失败");
+      });
+    }
 
-    unsubs.push(
-      listen<{ message?: string }>("session.error", (event) => {
-        setStatus(`错误: ${event.payload?.message ?? "unknown"}`);
-      })
-    );
-
-    unsubs.push(
-      listen("session.stopped", () => {
-        setStatus("会话已停止");
-      })
-    );
+    void poll();
+    pollTimer = window.setInterval(() => {
+      void poll();
+    }, 120);
 
     return () => {
-      void Promise.all(unsubs).then((handlers) => {
-        handlers.forEach((off) => off());
-      });
+      stopped = true;
+      if (pollTimer !== undefined) {
+        window.clearInterval(pollTimer);
+      }
     };
   }, []);
 
@@ -128,24 +170,29 @@ export default function App() {
     [entries, activeId]
   );
 
-  async function stopSession() {
-    await invoke("request_stop");
-  }
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        HISTORY_STORAGE_KEY,
+        historyEnabled ? "1" : "0"
+      );
+    } catch {
+      // Ignore storage failures in restricted environments.
+    }
+  }, [historyEnabled]);
 
   return (
-    <div className="panel">
+    <div className={`panel ${historyEnabled ? "with-history" : "without-history"}`}>
       <header className="panel-header">
         <div className="header-left">
-          <h1>tetr 实时翻译</h1>
           <p className="status-text">{status}</p>
         </div>
-
-        <div className="header-right">
-          <span className="provider-pill">{provider}</span>
-          <button className="stop-btn" onClick={stopSession}>
-            结束
-          </button>
-        </div>
+        <button
+          className={`history-toggle ${historyEnabled ? "on" : "off"}`}
+          onClick={() => setHistoryEnabled((prev) => !prev)}
+        >
+          记录
+        </button>
       </header>
 
       <section className="active-translation">
@@ -155,20 +202,22 @@ export default function App() {
         </div>
       </section>
 
-      <section className="history">
-        <div className="section-title">最近记录</div>
-        <ul>
-          {entries.slice(0, 4).map((entry) => (
-            <li key={entry.id}>
-              <div className="meta-row">
-                <span>{entry.reason}</span>
-                <span>{entry.done ? "已完成" : "流式中"}</span>
-              </div>
-              <div className="history-text">{entry.text || "..."}</div>
-            </li>
-          ))}
-        </ul>
-      </section>
+      {historyEnabled ? (
+        <section className="history">
+          <div className="section-title">最近记录</div>
+          <ul>
+            {entries.slice(0, 4).map((entry) => (
+              <li key={entry.id}>
+                <div className="meta-row">
+                  <span>{entry.reason}</span>
+                  <span>{entry.done ? "已完成" : "流式中"}</span>
+                </div>
+                <div className="history-text">{entry.text || "..."}</div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </div>
   );
 }
