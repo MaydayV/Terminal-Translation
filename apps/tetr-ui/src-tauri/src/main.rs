@@ -11,10 +11,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
-#[cfg(target_os = "windows")]
-use window_vibrancy::apply_acrylic;
-#[cfg(target_os = "macos")]
-use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct IpcEnvelope {
@@ -69,11 +65,8 @@ fn main() {
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_always_on_top(true);
+                let _ = window.set_decorations(true);
                 let _ = pin_window_to_bottom(&window);
-                #[cfg(target_os = "macos")]
-                let _ = apply_vibrancy(&window, NSVisualEffectMaterial::HudWindow, None, None);
-                #[cfg(target_os = "windows")]
-                let _ = apply_acrylic(&window, Some((18, 24, 28, 180)));
             }
 
             #[cfg(target_os = "macos")]
@@ -96,6 +89,7 @@ fn main() {
                 let addr = format!("127.0.0.1:{port}");
                 let mut stream_opt: Option<TcpStream> = None;
                 let start = Instant::now();
+
                 while start.elapsed() < Duration::from_secs(30) {
                     if let Ok(stream) = TcpStream::connect(&addr) {
                         stream_opt = Some(stream);
@@ -234,7 +228,7 @@ fn start_macos_window_tracker(app_handle: tauri::AppHandle) {
                 }
             }
 
-            thread::sleep(Duration::from_millis(350));
+            thread::sleep(Duration::from_millis(250));
         }
     });
 }
@@ -261,10 +255,10 @@ fn query_front_app_layout() -> FrontAppLayout {
         return FrontAppLayout::UnsupportedTerminal;
     };
 
-    let term_width = (x2 - x1).max(420) as u32;
+    let term_width = (x2 - x1).max(220) as u32;
     let term_height = (y2 - y1).max(240);
-    let panel_height = ((term_height as f32 * 0.36).round() as i32).clamp(190, 360);
-    let panel_y = y2 - panel_height - 8;
+    let panel_height = ((term_height as f32 * 0.34).round() as i32).clamp(180, 320);
+    let panel_y = y2 - panel_height;
 
     FrontAppLayout::TerminalBounds {
         x: x1,

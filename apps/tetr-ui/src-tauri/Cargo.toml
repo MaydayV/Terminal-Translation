@@ -12,4 +12,3 @@ tauri-build = { version = "2" }
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }
-window-vibrancy = "0.6"

@@ -11,64 +11,69 @@ type TranslationEntry = {
   inputChars?: number;
 };
 
+type SessionStartedPayload = {
+  provider?: string;
+};
+
 type DonePayload = {
   translation?: string;
-  meta?: {
-    provider?: string;
-    model?: string;
-    latency_ms?: number;
-    latencyMs?: number;
-  };
 };
 
 export default function App() {
   const [entries, setEntries] = useState<TranslationEntry[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [status, setStatus] = useState("等待会话...");
+  const [provider, setProvider] = useState("-");
   const activeIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     const unsubs: Promise<UnlistenFn>[] = [];
 
     unsubs.push(
-      listen("session.started", () => {
+      listen<SessionStartedPayload>("session.started", (event) => {
+        setProvider(event.payload?.provider ?? "-");
         setStatus("会话已启动");
       })
     );
 
     unsubs.push(
-      listen<{ reason?: string; selectedChars?: number }>("translation.started", (event) => {
-        const id = Date.now();
-        activeIdRef.current = id;
-        setActiveId(id);
-        setEntries((prev) => [
-          {
-            id,
-            reason: event.payload?.reason ?? "unknown",
-            text: "",
-            done: false,
-            startedAt: Date.now(),
-            inputChars: event.payload?.selectedChars,
-          },
-          ...prev,
-        ]);
-        setStatus("翻译中...");
-      })
+      listen<{ reason?: string; selectedChars?: number }>(
+        "translation.started",
+        (event) => {
+          const id = Date.now();
+          activeIdRef.current = id;
+          setActiveId(id);
+          setEntries((prev) => [
+            {
+              id,
+              reason: event.payload?.reason ?? "unknown",
+              text: "",
+              done: false,
+              startedAt: Date.now(),
+              inputChars: event.payload?.selectedChars,
+            },
+            ...prev,
+          ]);
+          setStatus("翻译中...");
+        }
+      )
     );
 
     unsubs.push(
       listen<{ delta?: string }>("translation.delta", (event) => {
         const delta = event.payload?.delta ?? "";
-        if (!delta) {
-          return;
-        }
-
         const currentId = activeIdRef.current;
-        if (currentId === null) {
+        if (!delta || currentId === null) {
           return;
         }
 
-        setEntries((prev) => prev.map((entry) => (entry.id === currentId ? { ...entry, text: `${entry.text}${delta}` } : entry)));
+        setEntries((prev) =>
+          prev.map((entry) =>
+            entry.id === currentId
+              ? { ...entry, text: `${entry.text}${delta}` }
+              : entry
+          )
+        );
       })
     );
 
@@ -86,14 +91,14 @@ export default function App() {
               return entry;
             }
 
-            const nextText = translation ?? entry.text;
             return {
               ...entry,
-              text: nextText,
+              text: translation ?? entry.text,
               done: true,
             };
           })
         );
+
         activeIdRef.current = null;
         setStatus("已完成");
       })
@@ -130,28 +135,34 @@ export default function App() {
   return (
     <div className="panel">
       <header className="panel-header">
-        <div>
-          <h1>tetr</h1>
-          <p>{status}</p>
+        <div className="header-left">
+          <h1>tetr 实时翻译</h1>
+          <p className="status-text">{status}</p>
         </div>
-        <button className="stop-btn" onClick={stopSession}>
-          结束会话
-        </button>
+
+        <div className="header-right">
+          <span className="provider-pill">{provider}</span>
+          <button className="stop-btn" onClick={stopSession}>
+            结束
+          </button>
+        </div>
       </header>
 
       <section className="active-translation">
-        <h2>实时翻译</h2>
-        <div className="translation-text">{activeEntry?.text || "等待命令输出..."}</div>
+        <div className="section-title">实时翻译</div>
+        <div className="translation-text">
+          {activeEntry?.text || "等待命令输出..."}
+        </div>
       </section>
 
       <section className="history">
-        <h3>最近记录</h3>
+        <div className="section-title">最近记录</div>
         <ul>
-          {entries.slice(0, 5).map((entry) => (
+          {entries.slice(0, 4).map((entry) => (
             <li key={entry.id}>
               <div className="meta-row">
                 <span>{entry.reason}</span>
-                <span>{entry.done ? "done" : "streaming"}</span>
+                <span>{entry.done ? "已完成" : "流式中"}</span>
               </div>
               <div className="history-text">{entry.text || "..."}</div>
             </li>
