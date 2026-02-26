@@ -17,7 +17,7 @@ use tetr_core::capture_state::{CaptureState, TriggerReason, TriggeredCapture};
 use tetr_core::pty_bridge::{OutputChunk, PtyBridge};
 use tetr_core::translator::deepseek::DeepSeekTranslator;
 use tetr_core::translator::mock::MockTranslator;
-use tetr_core::translator::{TranslateError, Translator};
+use tetr_core::translator::{TranslateError, TranslationMeta, Translator};
 use tetr_core::truncation::{truncate_for_translation, TruncationConfig};
 
 #[derive(Debug, Parser)]
@@ -52,6 +52,7 @@ enum ConfigCommand {
     Unset { key: String },
     Path,
     List,
+    Test,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +69,7 @@ struct AppConfig {
     ui_bin: Option<String>,
     ui_history_enabled: Option<bool>,
     ui_source_enabled: Option<bool>,
+    ui_font_size: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -89,6 +91,7 @@ struct PersistedConfig {
     ui_bin: Option<String>,
     ui_history_enabled: Option<bool>,
     ui_source_enabled: Option<bool>,
+    ui_font_size: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -101,6 +104,13 @@ struct IpcServer {
     port: u16,
     event_tx: Sender<IpcEnvelope>,
     control_rx: Receiver<String>,
+}
+
+#[derive(Debug)]
+struct ConnectivityProbeResult {
+    output: String,
+    delta_count: usize,
+    meta: TranslationMeta,
 }
 
 impl IpcServer {
@@ -374,6 +384,7 @@ impl AppConfig {
             read_env_bool(&["TETR_UI_HISTORY_ENABLED"]).or(file_cfg.ui_history_enabled);
         let ui_source_enabled =
             read_env_bool(&["TETR_UI_SOURCE_ENABLED"]).or(file_cfg.ui_source_enabled);
+        let ui_font_size = read_env_u16(&["TETR_UI_FONT_SIZE"]).or(file_cfg.ui_font_size);
 
         Ok(Self {
             provider,
@@ -388,6 +399,7 @@ impl AppConfig {
             ui_bin,
             ui_history_enabled,
             ui_source_enabled,
+            ui_font_size,
         })
     }
 }
@@ -459,6 +471,10 @@ fn read_env_bool(keys: &[&str]) -> Option<bool> {
     read_env_nonempty(keys).and_then(|v| parse_bool_value(&v))
 }
 
+fn read_env_u16(keys: &[&str]) -> Option<u16> {
+    read_env_nonempty(keys).and_then(|v| parse_ui_font_size(&v))
+}
+
 fn run_config_command(command: CliCommand) -> Result<()> {
     match command {
         CliCommand::Set { key, value } => {
@@ -507,9 +523,67 @@ fn run_config_command(command: CliCommand) -> Result<()> {
                 println!("可配置键: {}", supported_config_keys().join(", "));
                 Ok(())
             }
+            Some(ConfigCommand::Test) => run_config_connectivity_test(),
             None => run_config_wizard(),
         },
     }
+}
+
+fn run_config_connectivity_test() -> Result<()> {
+    let cfg = AppConfig::from_sources(None)?;
+    let translator = build_translator(&cfg)?;
+
+    println!("开始测试模型连通性...");
+    println!("Provider: {}", cfg.provider);
+    let probe = run_connectivity_probe(translator.as_ref())?;
+    println!(
+        "连通性测试通过：model={} latency={}ms deltas={}",
+        probe.meta.model, probe.meta.latency_ms, probe.delta_count
+    );
+    println!("输出预览: {}", preview_text(&probe.output, 120));
+    Ok(())
+}
+
+fn run_connectivity_probe(translator: &dyn Translator) -> Result<ConnectivityProbeResult> {
+    const PROBE_INPUT: &str = "Connection check: summarize status in one short sentence.";
+
+    let mut output = String::new();
+    let mut delta_count = 0usize;
+    let mut on_delta = |delta: &str| {
+        if delta.is_empty() {
+            return;
+        }
+        delta_count += 1;
+        output.push_str(delta);
+    };
+
+    let meta = translator
+        .stream_translate(PROBE_INPUT, &mut on_delta)
+        .map_err(map_translate_error)?;
+
+    if delta_count == 0 || output.trim().is_empty() {
+        return Err(anyhow!("连通性测试失败：未收到流式输出"));
+    }
+
+    Ok(ConnectivityProbeResult {
+        output,
+        delta_count,
+        meta,
+    })
+}
+
+fn preview_text(input: &str, max_chars: usize) -> String {
+    let compact = input.replace('\n', " ").trim().to_string();
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+
+    let mut clipped = String::new();
+    for ch in compact.chars().take(max_chars) {
+        clipped.push(ch);
+    }
+    clipped.push('…');
+    clipped
 }
 
 fn run_config_wizard() -> Result<()> {
@@ -529,12 +603,14 @@ fn run_config_wizard() -> Result<()> {
         println!("2) 设置当前 Provider 的模型");
         println!("3) 设置当前 Provider 的接口地址");
         println!("4) 设置当前 Provider 的 API Key");
-        println!("5) 设置触发空闲时间（毫秒）");
-        println!("6) 设置输出截断参数");
-        println!("7) 查看当前配置");
-        println!("8) 清除一个配置项");
-        println!("9) 显示配置文件路径");
-        println!("10) 设置 UI 默认显示项（记录/原文）");
+        println!("5) 设置 UI 默认显示项（记录/原文）");
+        println!("6) 设置 UI 字号（像素）");
+        println!("7) 设置触发空闲时间（毫秒）");
+        println!("8) 设置输出截断参数");
+        println!("9) 测试当前模型连通性");
+        println!("10) 查看当前配置");
+        println!("11) 清除一个配置项");
+        println!("12) 显示配置文件路径");
         println!("0) 退出");
 
         let choice = prompt_line("请选择: ")?;
@@ -556,29 +632,36 @@ fn run_config_wizard() -> Result<()> {
                 save_persisted_config(&cfg)?;
             }
             "5" => {
-                configure_idle_ms(&mut cfg)?;
+                configure_ui_defaults(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
             "6" => {
-                configure_truncation(&mut cfg)?;
+                configure_ui_font_size(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
             "7" => {
+                configure_idle_ms(&mut cfg)?;
+                save_persisted_config(&cfg)?;
+            }
+            "8" => {
+                configure_truncation(&mut cfg)?;
+                save_persisted_config(&cfg)?;
+            }
+            "9" => {
+                run_config_connectivity_test()?;
+            }
+            "10" => {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&masked_config_for_display(&cfg))?
                 );
             }
-            "8" => {
+            "11" => {
                 configure_unset_key(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
-            "9" => {
+            "12" => {
                 println!("配置文件: {}", config_file_path()?.display());
-            }
-            "10" => {
-                configure_ui_defaults(&mut cfg)?;
-                save_persisted_config(&cfg)?;
             }
             "0" | "q" | "quit" | "exit" => {
                 println!("已退出配置向导");
@@ -737,30 +820,54 @@ fn configure_ui_defaults(cfg: &mut PersistedConfig) -> Result<()> {
 
     let history_current = cfg
         .ui_history_enabled
-        .map(|v| if v { "on".to_string() } else { "off".to_string() })
+        .map(|v| {
+            if v {
+                "开".to_string()
+            } else {
+                "关".to_string()
+            }
+        })
         .unwrap_or_else(|| "跟随上次 UI 选择(默认)".to_string());
-    let history_input = prompt_line(&format!(
-        "ui_history_enabled [{history_current}] (on/off): "
-    ))?;
+    let history_input = prompt_line(&format!("翻译记录默认显示 [{history_current}]（开/关）: "))?;
     if !history_input.is_empty() {
         let parsed = parse_bool_value(&history_input)
-            .ok_or_else(|| anyhow!("ui_history_enabled 仅支持 on/off/true/false/1/0"))?;
+            .ok_or_else(|| anyhow!("翻译记录开关仅支持 开/关/是/否/on/off/true/false/1/0"))?;
         cfg.ui_history_enabled = Some(parsed);
     }
 
     let source_current = cfg
         .ui_source_enabled
-        .map(|v| if v { "on".to_string() } else { "off".to_string() })
+        .map(|v| {
+            if v {
+                "开".to_string()
+            } else {
+                "关".to_string()
+            }
+        })
         .unwrap_or_else(|| "跟随上次 UI 选择(默认)".to_string());
-    let source_input =
-        prompt_line(&format!("ui_source_enabled [{source_current}] (on/off): "))?;
+    let source_input = prompt_line(&format!("原文默认显示 [{source_current}]（开/关）: "))?;
     if !source_input.is_empty() {
         let parsed = parse_bool_value(&source_input)
-            .ok_or_else(|| anyhow!("ui_source_enabled 仅支持 on/off/true/false/1/0"))?;
+            .ok_or_else(|| anyhow!("原文开关仅支持 开/关/是/否/on/off/true/false/1/0"))?;
         cfg.ui_source_enabled = Some(parsed);
     }
 
     println!("UI 默认显示项已更新");
+    Ok(())
+}
+
+fn configure_ui_font_size(cfg: &mut PersistedConfig) -> Result<()> {
+    let current = cfg
+        .ui_font_size
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "11(默认)".to_string());
+    let value = prompt_line(&format!("翻译窗口字号像素 [{current}]（建议 9-22）: "))?;
+    if value.is_empty() {
+        return Ok(());
+    }
+    let size = parse_ui_font_size(&value).ok_or_else(|| anyhow!("字号仅支持 9-22 的整数"))?;
+    cfg.ui_font_size = Some(size);
+    println!("已设置 ui_font_size = {size}");
     Ok(())
 }
 
@@ -877,15 +984,19 @@ fn set_config_value(cfg: &mut PersistedConfig, key: &str, value: &str) -> Result
         }
         "ui_bin" => cfg.ui_bin = Some(value.to_string()),
         "ui_history_enabled" => {
-            cfg.ui_history_enabled = Some(
-                parse_bool_value(value)
-                    .ok_or_else(|| anyhow!("ui_history_enabled 仅支持 on/off/true/false/1/0"))?,
-            )
+            cfg.ui_history_enabled = Some(parse_bool_value(value).ok_or_else(|| {
+                anyhow!("ui_history_enabled 仅支持 开/关/是/否/on/off/true/false/1/0")
+            })?)
         }
         "ui_source_enabled" => {
-            cfg.ui_source_enabled = Some(
-                parse_bool_value(value)
-                    .ok_or_else(|| anyhow!("ui_source_enabled 仅支持 on/off/true/false/1/0"))?,
+            cfg.ui_source_enabled = Some(parse_bool_value(value).ok_or_else(|| {
+                anyhow!("ui_source_enabled 仅支持 开/关/是/否/on/off/true/false/1/0")
+            })?)
+        }
+        "ui_font_size" | "ui_font_size_px" => {
+            cfg.ui_font_size = Some(
+                parse_ui_font_size(value)
+                    .ok_or_else(|| anyhow!("ui_font_size 仅支持 9-22 的整数"))?,
             )
         }
         _ => {
@@ -919,6 +1030,7 @@ fn unset_config_value(cfg: &mut PersistedConfig, key: &str) -> Result<()> {
         "ui_bin" => cfg.ui_bin = None,
         "ui_history_enabled" => cfg.ui_history_enabled = None,
         "ui_source_enabled" => cfg.ui_source_enabled = None,
+        "ui_font_size" | "ui_font_size_px" => cfg.ui_font_size = None,
         _ => {
             return Err(anyhow!(
                 "不支持的配置键: {key}。可用键: {}",
@@ -949,6 +1061,7 @@ fn get_config_value(cfg: &PersistedConfig, key: &str) -> Result<Option<String>> 
         "ui_bin" => cfg.ui_bin.clone(),
         "ui_history_enabled" => cfg.ui_history_enabled.map(|v| v.to_string()),
         "ui_source_enabled" => cfg.ui_source_enabled.map(|v| v.to_string()),
+        "ui_font_size" | "ui_font_size_px" => cfg.ui_font_size.map(|v| v.to_string()),
         _ => {
             return Err(anyhow!(
                 "不支持的配置键: {key}。可用键: {}",
@@ -993,6 +1106,7 @@ fn masked_config_for_display(cfg: &PersistedConfig) -> serde_json::Value {
         "ui_bin": cfg.ui_bin,
         "ui_history_enabled": cfg.ui_history_enabled,
         "ui_source_enabled": cfg.ui_source_enabled,
+        "ui_font_size": cfg.ui_font_size,
     })
 }
 
@@ -1015,6 +1129,7 @@ fn supported_config_keys() -> Vec<&'static str> {
         "ui_bin",
         "ui_history_enabled",
         "ui_source_enabled",
+        "ui_font_size",
     ]
 }
 
@@ -1131,6 +1246,9 @@ fn build_session_started_payload(cfg: &AppConfig) -> Value {
     if let Some(enabled) = cfg.ui_source_enabled {
         payload.insert("uiSourceEnabled".to_string(), json!(enabled));
     }
+    if let Some(font_size) = cfg.ui_font_size {
+        payload.insert("uiFontSizePx".to_string(), json!(font_size));
+    }
     Value::Object(payload)
 }
 
@@ -1140,9 +1258,20 @@ fn should_translate_text(input: &str) -> bool {
 
 fn parse_bool_value(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
+        "开" | "是" => Some(true),
+        "关" | "否" => Some(false),
         "1" | "true" | "yes" | "on" | "enable" | "enabled" => Some(true),
         "0" | "false" | "no" | "off" | "disable" | "disabled" => Some(false),
         _ => None,
+    }
+}
+
+fn parse_ui_font_size(value: &str) -> Option<u16> {
+    let parsed = value.trim().parse::<u16>().ok()?;
+    if (9..=22).contains(&parsed) {
+        Some(parsed)
+    } else {
+        None
     }
 }
 
@@ -1236,17 +1365,31 @@ fn spawn_ui_process(port: u16, configured_ui_bin: Option<&str>) -> Result<Child>
 #[cfg(test)]
 mod tests {
     use super::{
-        build_translation_started_payload, parse_bool_value, set_config_value, should_translate_text,
-        supported_config_keys, PersistedConfig, TriggerReason,
+        build_session_started_payload, build_translation_started_payload, parse_bool_value,
+        parse_ui_font_size, run_connectivity_probe, set_config_value, should_translate_text,
+        supported_config_keys, AppConfig, PersistedConfig, TriggerReason,
     };
+    use tetr_core::translator::mock::MockTranslator;
+    use tetr_core::translator::{TranslateError, TranslationMeta, Translator};
 
     #[test]
     fn translation_started_payload_includes_source_excerpt() {
-        let payload =
-            build_translation_started_payload(TriggerReason::Prompt, true, 3200, 540, "line1\nline2");
+        let payload = build_translation_started_payload(
+            TriggerReason::Prompt,
+            true,
+            3200,
+            540,
+            "line1\nline2",
+        );
 
-        assert_eq!(payload.get("reason").and_then(|v| v.as_str()), Some("prompt"));
-        assert_eq!(payload.get("truncated").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            payload.get("reason").and_then(|v| v.as_str()),
+            Some("prompt")
+        );
+        assert_eq!(
+            payload.get("truncated").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert_eq!(
             payload.get("originalChars").and_then(|v| v.as_u64()),
             Some(3200)
@@ -1255,7 +1398,10 @@ mod tests {
             payload.get("selectedChars").and_then(|v| v.as_u64()),
             Some(540)
         );
-        assert_eq!(payload.get("source").and_then(|v| v.as_str()), Some("line1\nline2"));
+        assert_eq!(
+            payload.get("source").and_then(|v| v.as_str()),
+            Some("line1\nline2")
+        );
     }
 
     #[test]
@@ -1283,5 +1429,86 @@ mod tests {
         set_config_value(&mut cfg, "ui_history_enabled", "true").expect("set should succeed");
         assert_eq!(cfg.ui_history_enabled, Some(true));
         assert!(supported_config_keys().contains(&"ui_history_enabled"));
+    }
+
+    #[test]
+    fn parses_chinese_boolean_values_for_config() {
+        assert_eq!(parse_bool_value("开"), Some(true));
+        assert_eq!(parse_bool_value("关"), Some(false));
+        assert_eq!(parse_bool_value("是"), Some(true));
+        assert_eq!(parse_bool_value("否"), Some(false));
+    }
+
+    #[test]
+    fn parses_ui_font_size_with_bounds() {
+        assert_eq!(parse_ui_font_size("10"), Some(10));
+        assert_eq!(parse_ui_font_size("22"), Some(22));
+        assert_eq!(parse_ui_font_size("8"), None);
+        assert_eq!(parse_ui_font_size("99"), None);
+    }
+
+    #[test]
+    fn session_started_payload_includes_ui_font_size() {
+        let cfg = AppConfig {
+            provider: "openai-compatible".to_string(),
+            idle_ms: 300,
+            truncation: Default::default(),
+            deepseek_api_key: None,
+            deepseek_base_url: String::new(),
+            deepseek_model: String::new(),
+            openai_api_key: None,
+            openai_base_url: String::new(),
+            openai_model: String::new(),
+            ui_bin: None,
+            ui_history_enabled: None,
+            ui_source_enabled: None,
+            ui_font_size: Some(10),
+        };
+
+        let payload = build_session_started_payload(&cfg);
+        assert_eq!(
+            payload.get("uiFontSizePx").and_then(|v| v.as_u64()),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn connectivity_probe_succeeds_with_streaming_output() {
+        let translator = MockTranslator;
+        let result = run_connectivity_probe(&translator).expect("probe should succeed");
+
+        assert!(result.delta_count > 0);
+        assert!(!result.output.trim().is_empty());
+        assert_eq!(result.meta.provider, "mock");
+    }
+
+    #[test]
+    fn connectivity_probe_fails_without_deltas() {
+        struct SilentTranslator;
+
+        impl Translator for SilentTranslator {
+            fn provider_name(&self) -> &'static str {
+                "silent"
+            }
+
+            fn stream_translate(
+                &self,
+                input: &str,
+                _on_delta: &mut dyn FnMut(&str),
+            ) -> Result<TranslationMeta, TranslateError> {
+                Ok(TranslationMeta {
+                    provider: self.provider_name().to_string(),
+                    model: "silent-model".to_string(),
+                    input_chars: input.chars().count(),
+                    output_chars: 0,
+                    latency_ms: 1,
+                    truncated: false,
+                })
+            }
+        }
+
+        let translator = SilentTranslator;
+        let error = run_connectivity_probe(&translator).expect_err("probe should fail");
+        assert!(error.to_string().contains("未收到流式输出"));
     }
 }
