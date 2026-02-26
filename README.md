@@ -29,6 +29,8 @@ cargo build -p tetr-cli
 ```
 
 ### 2. Homebrew 安装（给其他用户）
+当前自动发布产物为 `macOS arm64`（Apple 芯片）。
+
 首次安装：
 ```bash
 brew tap MaydayV/tap

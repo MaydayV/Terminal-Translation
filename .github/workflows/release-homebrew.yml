@@ -15,19 +15,9 @@ permissions:
   contents: write
 
 jobs:
-  build-macos:
-    name: build-${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            arch: arm64
-          - runner: macos-13
-            target: x86_64-apple-darwin
-            arch: x86_64
+  build-arm64:
+    name: build-arm64
+    runs-on: macos-14
 
     steps:
       - name: Checkout
@@ -48,7 +38,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - name: Install frontend dependencies
         run: pnpm --dir apps/tetr-ui install --frozen-lockfile
@@ -57,24 +47,24 @@ jobs:
         run: pnpm --dir apps/tetr-ui build
 
       - name: Build binaries
-        run: cargo build --release --target ${{ matrix.target }} -p tetr-cli -p tetr-ui
+        run: cargo build --release --target aarch64-apple-darwin -p tetr-cli -p tetr-ui
 
       - name: Package tarball
         shell: bash
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          out="${APP_NAME}-${tag}-macos-${{ matrix.arch }}.tar.gz"
+          out="${APP_NAME}-${tag}-macos-arm64.tar.gz"
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/tetr" dist/
-          cp "target/${{ matrix.target }}/release/tetr-ui" dist/
+          cp "target/aarch64-apple-darwin/release/tetr" dist/
+          cp "target/aarch64-apple-darwin/release/tetr-ui" dist/
           tar -C dist -czf "$out" tetr tetr-ui
           shasum -a 256 "$out" > "${out}.sha256"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.arch }}
+          name: release-arm64
           path: |
             tetr-*.tar.gz
             tetr-*.tar.gz.sha256
@@ -82,7 +72,7 @@ jobs:
   release-and-update-tap:
     name: release-and-update-tap
     runs-on: ubuntu-latest
-    needs: build-macos
+    needs: build-arm64
 
     steps:
       - name: Checkout
@@ -98,7 +88,6 @@ jobs:
         run: |
           set -euo pipefail
           cat artifacts/release-arm64/*.sha256 > SHA256SUMS.txt
-          cat artifacts/release-x86_64/*.sha256 >> SHA256SUMS.txt
           sort -o SHA256SUMS.txt SHA256SUMS.txt
 
       - name: Publish GitHub release
@@ -106,33 +95,27 @@ jobs:
         with:
           files: |
             artifacts/release-arm64/*.tar.gz
-            artifacts/release-x86_64/*.tar.gz
             SHA256SUMS.txt
 
-      - name: Extract checksum values
+      - name: Extract checksum value
         id: checksums
         shell: bash
         run: |
           set -euo pipefail
           arm_file="tetr-${GITHUB_REF_NAME}-macos-arm64.tar.gz"
-          intel_file="tetr-${GITHUB_REF_NAME}-macos-x86_64.tar.gz"
-
           arm_sha="$(awk -v file="$arm_file" '$2 == file { print $1 }' SHA256SUMS.txt)"
-          intel_sha="$(awk -v file="$intel_file" '$2 == file { print $1 }' SHA256SUMS.txt)"
 
-          if [ -z "$arm_sha" ] || [ -z "$intel_sha" ]; then
-            echo "Failed to resolve checksums from SHA256SUMS.txt" >&2
+          if [ -z "$arm_sha" ]; then
+            echo "Failed to resolve checksum from SHA256SUMS.txt" >&2
             exit 1
           fi
 
           echo "arm_sha=$arm_sha" >> "$GITHUB_OUTPUT"
-          echo "intel_sha=$intel_sha" >> "$GITHUB_OUTPUT"
 
       - name: Update homebrew tap formula
         env:
           TAG: ${{ github.ref_name }}
           ARM_SHA: ${{ steps.checksums.outputs.arm_sha }}
-          INTEL_SHA: ${{ steps.checksums.outputs.intel_sha }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         shell: bash
         run: |
@@ -146,7 +129,7 @@ jobs:
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
           mkdir -p tap/Formula
 
-          ./.github/scripts/generate_formula.sh "$TAG" "$ARM_SHA" "$INTEL_SHA" "$SOURCE_REPO" > tap/Formula/tetr.rb
+          ./.github/scripts/generate_formula.sh "$TAG" "$ARM_SHA" "$SOURCE_REPO" > tap/Formula/tetr.rb
 
           cd tap
           git config user.name "github-actions[bot]"
