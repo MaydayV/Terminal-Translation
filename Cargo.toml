@@ -1,0 +1,29 @@
+[workspace]
+members = [
+  "crates/tetr-core",
+  "apps/tetr-cli",
+  "apps/tetr-ui/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["colin"]
+
+[workspace.dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+crossbeam-channel = "0.5"
+regex = "1.11"
+portable-pty = "0.9"
+strip-ansi-escapes = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+terminal_size = "0.4"
+crossterm = "0.29"
+log = "0.4"
+env_logger = "0.11"

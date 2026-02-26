@@ -1,0 +1,7 @@
+/target
+**/node_modules
+/apps/tetr-ui/dist
+/apps/tetr-ui/src-tauri/gen
+/apps/tetr-ui/.vite
+/apps/tetr-ui/src-tauri/target
+.DS_Store

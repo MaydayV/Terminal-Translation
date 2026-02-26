@@ -1,0 +1,145 @@
+:root {
+  --bg-start: rgba(7, 23, 27, 0.72);
+  --bg-end: rgba(23, 31, 33, 0.7);
+  --line: rgba(134, 188, 198, 0.28);
+  --text: #e9f6f8;
+  --muted: #b5ced3;
+  --accent: #27c2a6;
+  --danger: #ff8266;
+  --shadow: 0 16px 40px rgba(4, 10, 12, 0.45);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  font-family: "IBM Plex Sans", "SF Pro Display", "PingFang SC", "Segoe UI", sans-serif;
+  color: var(--text);
+  background: transparent;
+}
+
+body {
+  padding: 8px;
+}
+
+.panel {
+  height: 100%;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(125deg, var(--bg-start), var(--bg-end));
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  overflow: hidden;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.panel-header h1 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.panel-header p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stop-btn {
+  border: 1px solid rgba(255, 130, 102, 0.55);
+  background: rgba(255, 130, 102, 0.16);
+  color: #ffd6ce;
+  border-radius: 999px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.stop-btn:hover {
+  background: rgba(255, 130, 102, 0.22);
+}
+
+.active-translation {
+  padding: 14px;
+  overflow: auto;
+}
+
+.active-translation h2 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.translation-text {
+  white-space: pre-wrap;
+  line-height: 1.5;
+  font-size: 14px;
+}
+
+.history {
+  border-top: 1px solid var(--line);
+  padding: 10px 14px;
+  overflow: auto;
+}
+
+.history h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.history ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.history li {
+  padding: 8px;
+  border: 1px solid rgba(140, 196, 207, 0.15);
+  border-radius: 10px;
+  background: rgba(5, 11, 13, 0.24);
+}
+
+.meta-row {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.history-text {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 720px) {
+  body {
+    padding: 0;
+  }
+
+  .panel {
+    border-radius: 0;
+  }
+}
