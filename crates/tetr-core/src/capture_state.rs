@@ -53,7 +53,10 @@ impl CaptureState {
 
     pub fn note_user_command(&mut self, command: &str) {
         self.mode = CaptureMode::Exec;
-        self.pending_command = Some(normalize_shell_text(command));
+        self.pending_command = match normalize_command_for_match(command) {
+            normalized if normalized.is_empty() => None,
+            normalized => Some(normalized),
+        };
         self.command_echo_skipped = false;
         self.lines.clear();
         self.last_output_at = None;
@@ -113,7 +116,7 @@ impl CaptureState {
                 continue;
             }
 
-            if !self.command_echo_skipped && self.is_command_echo(&normalized_line) {
+            if !self.command_echo_skipped && self.should_skip_command_echo(&normalized_line) {
                 self.command_echo_skipped = true;
                 self.mode = CaptureMode::Filter;
                 continue;
@@ -148,7 +151,17 @@ impl CaptureState {
             return false;
         };
 
-        !command.is_empty() && normalized_line == command
+        normalize_command_for_match(normalized_line) == *command
+    }
+
+    fn should_skip_command_echo(&self, normalized_line: &str) -> bool {
+        if self.is_command_echo(normalized_line) {
+            return true;
+        }
+
+        // stdin-side command capture can be empty when the shell line was produced via
+        // history recall or complex line editing. In that case, skip obvious command echoes.
+        self.pending_command.is_none() && looks_like_shell_command_line(normalized_line)
     }
 
     fn emit(&mut self, reason: TriggerReason) -> Option<TriggeredCapture> {
@@ -172,6 +185,157 @@ impl CaptureState {
 
 fn normalize_shell_text(line: &str) -> String {
     line.trim_end_matches('\r').trim().to_string()
+}
+
+fn normalize_command_for_match(raw: &str) -> String {
+    strip_ansi_like_control(raw)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn strip_ansi_like_control(input: &str) -> String {
+    let mut output = String::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some('O') => {
+                    chars.next();
+                    let _ = chars.next();
+                }
+                Some(_) => {
+                    let _ = chars.next();
+                }
+                None => {}
+            }
+            continue;
+        }
+
+        if ch.is_control() {
+            continue;
+        }
+
+        output.push(ch);
+    }
+
+    output
+}
+
+fn looks_like_shell_command_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let Some(first_token) = trimmed.split_whitespace().next() else {
+        return false;
+    };
+
+    if !(looks_like_command_token(first_token) || looks_like_env_assignment(first_token)) {
+        return false;
+    }
+
+    if trimmed.contains("&&")
+        || trimmed.contains("||")
+        || trimmed.contains('|')
+        || trimmed.contains('>')
+        || trimmed.contains('<')
+        || trimmed.contains("--")
+        || trimmed.contains(" -")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || looks_like_env_assignment(first_token)
+        || is_known_shell_command(first_token)
+    {
+        return true;
+    }
+
+    let word_count = trimmed.split_whitespace().count();
+    word_count <= 3
+        && first_token.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-' | '.')
+        })
+}
+
+fn looks_like_command_token(token: &str) -> bool {
+    if token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with("~/")
+        || token.starts_with('/')
+    {
+        return true;
+    }
+
+    token
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+}
+
+fn looks_like_env_assignment(token: &str) -> bool {
+    let Some((name, value)) = token.split_once('=') else {
+        return false;
+    };
+
+    !name.is_empty()
+        && !value.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn is_known_shell_command(token: &str) -> bool {
+    let cmd = token.strip_prefix("sudo").map(str::trim).unwrap_or(token);
+    matches!(
+        cmd,
+        "cd" | "ls"
+            | "pwd"
+            | "cat"
+            | "grep"
+            | "find"
+            | "awk"
+            | "sed"
+            | "curl"
+            | "wget"
+            | "git"
+            | "npm"
+            | "pnpm"
+            | "yarn"
+            | "node"
+            | "python"
+            | "python3"
+            | "pip"
+            | "pip3"
+            | "cargo"
+            | "go"
+            | "brew"
+            | "docker"
+            | "kubectl"
+            | "make"
+            | "cmake"
+            | "bash"
+            | "zsh"
+            | "sh"
+            | "source"
+            | "export"
+            | "unset"
+            | "echo"
+            | "date"
+            | "mv"
+            | "cp"
+            | "rm"
+            | "mkdir"
+            | "rmdir"
+    )
 }
 
 fn trim_trailing_prompt_noise(lines: &mut Vec<String>) {
@@ -364,6 +528,49 @@ mod tests {
             triggered,
             Some(TriggeredCapture {
                 text: "Speak like a human.".to_string(),
+                reason: TriggerReason::Prompt,
+            })
+        );
+    }
+
+    #[test]
+    fn skips_command_echo_when_command_capture_is_empty() {
+        let start = Instant::now();
+        let mut state = CaptureState::new(300);
+
+        // Simulates history recall/editing paths where stdin-side command capture is empty.
+        state.note_user_command("");
+        let triggered = state.ingest_chunk(
+            "curl -s https://api.github.com/zen\nKeep it logically awesome.\n$ ",
+            "curl -s https://api.github.com/zen\nKeep it logically awesome.\n$ ",
+            start,
+        );
+
+        assert_eq!(
+            triggered,
+            Some(TriggeredCapture {
+                text: "Keep it logically awesome.".to_string(),
+                reason: TriggerReason::Prompt,
+            })
+        );
+    }
+
+    #[test]
+    fn keeps_natural_sentence_when_command_capture_is_empty() {
+        let start = Instant::now();
+        let mut state = CaptureState::new(300);
+
+        state.note_user_command("");
+        let triggered = state.ingest_chunk(
+            "Keep it logically awesome.\n$ ",
+            "Keep it logically awesome.\n$ ",
+            start,
+        );
+
+        assert_eq!(
+            triggered,
+            Some(TriggeredCapture {
+                text: "Keep it logically awesome.".to_string(),
                 reason: TriggerReason::Prompt,
             })
         );

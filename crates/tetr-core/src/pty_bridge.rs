@@ -139,7 +139,7 @@ impl PtyBridge {
 
                 match byte[0] {
                     b'\r' | b'\n' => {
-                        let cmd = String::from_utf8_lossy(&current_command).trim().to_string();
+                        let cmd = normalize_user_command_input(&current_command);
                         if !cmd.is_empty() {
                             let _ = command_tx.send(cmd);
                         }
@@ -201,9 +201,56 @@ fn normalize_for_translation_text(input: String) -> String {
         .join("\n")
 }
 
+fn normalize_user_command_input(raw: &[u8]) -> String {
+    let mut cleaned = Vec::with_capacity(raw.len());
+    let mut index = 0usize;
+
+    while index < raw.len() {
+        match raw[index] {
+            0x1b => {
+                index += 1;
+                if index >= raw.len() {
+                    break;
+                }
+
+                match raw[index] {
+                    b'[' => {
+                        index += 1;
+                        while index < raw.len() {
+                            let next = raw[index];
+                            index += 1;
+                            if (0x40..=0x7E).contains(&next) {
+                                break;
+                            }
+                        }
+                    }
+                    b'O' => {
+                        index = (index + 2).min(raw.len());
+                    }
+                    _ => {
+                        index += 1;
+                    }
+                }
+            }
+            value if value.is_ascii_control() || value == 0x7f => {
+                index += 1;
+            }
+            value => {
+                cleaned.push(value);
+                index += 1;
+            }
+        }
+    }
+
+    String::from_utf8_lossy(&cleaned)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::normalize_for_translation_text;
+    use super::{normalize_for_translation_text, normalize_user_command_input};
 
     #[test]
     fn normalizes_windows_line_endings() {
@@ -217,5 +264,19 @@ mod tests {
         let input = "line1    \nline2\t\n".to_string();
         let output = normalize_for_translation_text(input);
         assert_eq!(output, "line1\nline2");
+    }
+
+    #[test]
+    fn strips_terminal_navigation_sequences_from_user_command_capture() {
+        let input = b"\x1b[A\x1b[Bcurl -s https://api.github.com/zen";
+        let output = normalize_user_command_input(input);
+        assert_eq!(output, "curl -s https://api.github.com/zen");
+    }
+
+    #[test]
+    fn keeps_utf8_and_compacts_whitespace_in_user_command_capture() {
+        let input = "  cd   /Users/colin/开发/插件工具  ".as_bytes();
+        let output = normalize_user_command_input(input);
+        assert_eq!(output, "cd /Users/colin/开发/插件工具");
     }
 }

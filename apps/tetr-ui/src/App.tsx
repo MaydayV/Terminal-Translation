@@ -103,6 +103,34 @@ function parseUiBgColor(input: unknown): string | null {
   return null;
 }
 
+function parseUiBoolean(input: unknown): boolean | null {
+  if (typeof input === "boolean") {
+    return input;
+  }
+
+  if (typeof input === "number") {
+    if (input === 1) {
+      return true;
+    }
+    if (input === 0) {
+      return false;
+    }
+    return null;
+  }
+
+  if (typeof input === "string") {
+    const normalized = input.trim().toLowerCase();
+    if (normalized === "1" || normalized === "true" || normalized === "on") {
+      return true;
+    }
+    if (normalized === "0" || normalized === "false" || normalized === "off") {
+      return false;
+    }
+  }
+
+  return null;
+}
+
 function hexToRgb(hex: string): [number, number, number] {
   const raw = hex.replace(/^#/, "");
   const normalized = raw.length === 3 ? raw.split("").map((ch) => `${ch}${ch}`).join("") : raw;
@@ -127,6 +155,7 @@ export default function App() {
   const [fontSizePx, setFontSizePx] = useState(11);
   const [realtimeHeightPx, setRealtimeHeightPx] = useState<number | null>(null);
   const [historyHeightPx, setHistoryHeightPx] = useState<number | null>(null);
+  const [historyEnabled, setHistoryEnabled] = useState(true);
   const [bgColor, setBgColor] = useState("#121b2d");
   const [bgOpacityPercent, setBgOpacityPercent] = useState(100);
 
@@ -150,6 +179,7 @@ export default function App() {
             uiFontSizePx?: unknown;
             uiRealtimeHeightPx?: unknown;
             uiHistoryHeightPx?: unknown;
+            uiHistoryEnabled?: unknown;
             uiBgColor?: unknown;
             uiBgOpacityPercent?: unknown;
           };
@@ -159,6 +189,10 @@ export default function App() {
           }
           setRealtimeHeightPx(parseUiPanelHeightPx(data.uiRealtimeHeightPx));
           setHistoryHeightPx(parseUiPanelHeightPx(data.uiHistoryHeightPx));
+          const nextHistoryEnabled = parseUiBoolean(data.uiHistoryEnabled);
+          if (nextHistoryEnabled !== null) {
+            setHistoryEnabled(nextHistoryEnabled);
+          }
           const nextBg = parseUiBgColor(data.uiBgColor);
           if (nextBg !== null) {
             setBgColor(nextBg);
@@ -336,6 +370,10 @@ export default function App() {
     [fontSizePx, bgR, bgG, bgB, bgAlpha, translationCardAlpha, historyCardAlpha]
   );
   const contentStyle = useMemo(() => {
+    if (!historyEnabled) {
+      return { gridTemplateRows: "minmax(0, 1fr)" } as CSSProperties;
+    }
+
     if (realtimeHeightPx !== null && historyHeightPx !== null) {
       return { gridTemplateRows: `${realtimeHeightPx}px ${historyHeightPx}px` } as CSSProperties;
     }
@@ -346,7 +384,7 @@ export default function App() {
       return { gridTemplateRows: `minmax(0, 1fr) ${historyHeightPx}px` } as CSSProperties;
     }
     return { gridTemplateRows: "minmax(0, 2fr) minmax(0, 1fr)" } as CSSProperties;
-  }, [realtimeHeightPx, historyHeightPx]);
+  }, [historyEnabled, realtimeHeightPx, historyHeightPx]);
 
   return (
     <div className="panel minimal-panel" style={panelStyle}>
@@ -357,19 +395,21 @@ export default function App() {
           </div>
         </section>
 
-        <section className="history-section minimal-content">
-          <div className="history-card">
-            {historyEntries.length === 0 ? (
-              <div className="history-empty">暂无记录</div>
-            ) : (
-              historyEntries.map((entry) => (
-                <div key={entry.id} className="history-item">
-                  <div className="history-text">{normalizeDisplayText(entry.text)}</div>
-                </div>
-              ))
-            )}
-          </div>
-        </section>
+        {historyEnabled ? (
+          <section className="history-section minimal-content">
+            <div className="history-card">
+              {historyEntries.length === 0 ? (
+                <div className="history-empty">暂无记录</div>
+              ) : (
+                historyEntries.map((entry) => (
+                  <div key={entry.id} className="history-item">
+                    <div className="history-text">{normalizeDisplayText(entry.text)}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+        ) : null}
       </div>
     </div>
   );

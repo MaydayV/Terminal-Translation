@@ -310,7 +310,7 @@ cargo run -p tetr-cli --
 
 自动发布工作流：[`release-homebrew.yml`](./.github/workflows/release-homebrew.yml)
 
-触发方式：推送 `v*` 标签（如 `v0.1.10`）。
+触发方式：推送 `v*` 标签（如 `v0.1.11`）。
 
 工作流会自动：
 1. 构建 macOS arm64 二进制（`tetr` + `tetr-ui`）

@@ -867,35 +867,25 @@ fn configure_ui_defaults(cfg: &mut PersistedConfig) -> Result<()> {
 
     let history_current = cfg
         .ui_history_enabled
-        .map(|v| {
-            if v {
-                "开".to_string()
-            } else {
-                "关".to_string()
-            }
-        })
+        .map(format_bool_switch_state)
         .unwrap_or_else(|| "跟随上次 UI 选择(默认)".to_string());
-    let history_input = prompt_line(&format!("翻译记录默认显示 [{history_current}]（开/关）: "))?;
+    let history_input = prompt_line(&format!(
+        "翻译记录默认显示 [{history_current}]（1=开，0=关）: "
+    ))?;
     if !history_input.is_empty() {
-        let parsed = parse_bool_value(&history_input)
-            .ok_or_else(|| anyhow!("翻译记录开关仅支持 开/关/是/否/on/off/true/false/1/0"))?;
+        let parsed = parse_bool_switch_input(&history_input)
+            .ok_or_else(|| anyhow!("翻译记录开关仅支持 1 或 0"))?;
         cfg.ui_history_enabled = Some(parsed);
     }
 
     let source_current = cfg
         .ui_source_enabled
-        .map(|v| {
-            if v {
-                "开".to_string()
-            } else {
-                "关".to_string()
-            }
-        })
+        .map(format_bool_switch_state)
         .unwrap_or_else(|| "跟随上次 UI 选择(默认)".to_string());
-    let source_input = prompt_line(&format!("原文默认显示 [{source_current}]（开/关）: "))?;
+    let source_input = prompt_line(&format!("原文默认显示 [{source_current}]（1=开，0=关）: "))?;
     if !source_input.is_empty() {
-        let parsed = parse_bool_value(&source_input)
-            .ok_or_else(|| anyhow!("原文开关仅支持 开/关/是/否/on/off/true/false/1/0"))?;
+        let parsed = parse_bool_switch_input(&source_input)
+            .ok_or_else(|| anyhow!("原文开关仅支持 1 或 0"))?;
         cfg.ui_source_enabled = Some(parsed);
     }
 
@@ -908,20 +898,14 @@ fn configure_ui_styles(cfg: &mut PersistedConfig) -> Result<()> {
 
     let dock_icon_current = cfg
         .ui_dock_icon
-        .map(|v| {
-            if v {
-                "开".to_string()
-            } else {
-                "关".to_string()
-            }
-        })
-        .unwrap_or_else(|| "关(默认)".to_string());
+        .map(format_bool_switch_state)
+        .unwrap_or_else(|| "0(关，默认)".to_string());
     let dock_icon_input = prompt_line(&format!(
-        "Dock 图标 ui_dock_icon [{dock_icon_current}]（开/关）: "
+        "Dock 图标 ui_dock_icon [{dock_icon_current}]（1=开，0=关）: "
     ))?;
     if !dock_icon_input.is_empty() {
-        let parsed = parse_bool_value(&dock_icon_input)
-            .ok_or_else(|| anyhow!("ui_dock_icon 仅支持 开/关/是/否/on/off/true/false/1/0"))?;
+        let parsed = parse_bool_switch_input(&dock_icon_input)
+            .ok_or_else(|| anyhow!("ui_dock_icon 仅支持 1 或 0"))?;
         cfg.ui_dock_icon = Some(parsed);
     }
 
@@ -1128,19 +1112,20 @@ fn set_config_value(cfg: &mut PersistedConfig, key: &str, value: &str) -> Result
         "ui_bin" => cfg.ui_bin = Some(value.to_string()),
         "ui_history_enabled" => {
             cfg.ui_history_enabled = Some(parse_bool_value(value).ok_or_else(|| {
-                anyhow!("ui_history_enabled 仅支持 开/关/是/否/on/off/true/false/1/0")
+                anyhow!("ui_history_enabled 仅支持 1/0（兼容 true/false on/off）")
             })?)
         }
         "ui_source_enabled" => {
-            cfg.ui_source_enabled = Some(parse_bool_value(value).ok_or_else(|| {
-                anyhow!("ui_source_enabled 仅支持 开/关/是/否/on/off/true/false/1/0")
-            })?)
+            cfg.ui_source_enabled =
+                Some(parse_bool_value(value).ok_or_else(|| {
+                    anyhow!("ui_source_enabled 仅支持 1/0（兼容 true/false on/off）")
+                })?)
         }
         "ui_dock_icon" => {
-            cfg.ui_dock_icon =
-                Some(parse_bool_value(value).ok_or_else(|| {
-                    anyhow!("ui_dock_icon 仅支持 开/关/是/否/on/off/true/false/1/0")
-                })?)
+            cfg.ui_dock_icon = Some(
+                parse_bool_value(value)
+                    .ok_or_else(|| anyhow!("ui_dock_icon 仅支持 1/0（兼容 true/false on/off）"))?,
+            )
         }
         "ui_font_size" | "ui_font_size_px" => {
             cfg.ui_font_size = Some(
@@ -1476,6 +1461,13 @@ fn build_session_started_payload(cfg: &AppConfig) -> Value {
 }
 
 fn should_translate_text(input: &str) -> bool {
+    if input
+        .chars()
+        .any(|ch| ('\u{4E00}'..='\u{9FFF}').contains(&ch))
+    {
+        return false;
+    }
+
     input.chars().any(|ch| ch.is_ascii_alphabetic())
 }
 
@@ -1644,6 +1636,22 @@ fn parse_bool_value(value: &str) -> Option<bool> {
         "1" | "true" | "yes" | "on" | "enable" | "enabled" => Some(true),
         "0" | "false" | "no" | "off" | "disable" | "disabled" => Some(false),
         _ => None,
+    }
+}
+
+fn parse_bool_switch_input(value: &str) -> Option<bool> {
+    match value.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn format_bool_switch_state(enabled: bool) -> String {
+    if enabled {
+        "1(开)".to_string()
+    } else {
+        "0(关)".to_string()
     }
 }
 
@@ -1816,10 +1824,10 @@ fn spawn_ui_process(
 mod tests {
     use super::{
         align_translation_line_layout, build_session_started_payload,
-        build_translation_started_payload, parse_bool_value, parse_ui_bg_color,
-        parse_ui_bg_opacity, parse_ui_font_size, parse_ui_window_height, run_connectivity_probe,
-        set_config_value, should_translate_text, supported_config_keys, AppConfig, PersistedConfig,
-        TriggerReason,
+        build_translation_started_payload, parse_bool_switch_input, parse_bool_value,
+        parse_ui_bg_color, parse_ui_bg_opacity, parse_ui_font_size, parse_ui_window_height,
+        run_connectivity_probe, set_config_value, should_translate_text, supported_config_keys,
+        AppConfig, PersistedConfig, TriggerReason,
     };
     use tetr_core::translator::mock::MockTranslator;
     use tetr_core::translator::{TranslateError, TranslationMeta, Translator};
@@ -1865,7 +1873,7 @@ mod tests {
     #[test]
     fn translates_when_english_is_present() {
         assert!(should_translate_text("Error: file not found"));
-        assert!(should_translate_text("请求失败，请 retry with sudo"));
+        assert!(!should_translate_text("请求失败，请 retry with sudo"));
     }
 
     #[test]
@@ -1897,6 +1905,13 @@ mod tests {
         assert_eq!(parse_bool_value("on"), Some(true));
         assert_eq!(parse_bool_value("false"), Some(false));
         assert_eq!(parse_bool_value("unknown"), None);
+    }
+
+    #[test]
+    fn parses_numeric_switch_values_for_wizard() {
+        assert_eq!(parse_bool_switch_input("1"), Some(true));
+        assert_eq!(parse_bool_switch_input("0"), Some(false));
+        assert_eq!(parse_bool_switch_input("开"), None);
     }
 
     #[test]
