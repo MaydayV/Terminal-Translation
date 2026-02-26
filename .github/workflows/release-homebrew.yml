@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 env:
   APP_NAME: tetr
@@ -128,7 +129,6 @@ jobs:
           echo "intel_sha=$intel_sha" >> "$GITHUB_OUTPUT"
 
       - name: Update homebrew tap formula
-        if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
         env:
           TAG: ${{ github.ref_name }}
           ARM_SHA: ${{ steps.checksums.outputs.arm_sha }}
@@ -137,6 +137,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not configured; release published but tap not updated."
+            exit 0
+          fi
 
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
           mkdir -p tap/Formula
@@ -155,8 +160,3 @@ jobs:
           git add Formula/tetr.rb
           git commit -m "chore: update tetr formula for ${TAG}"
           git push origin HEAD
-
-      - name: Warn when tap token is missing
-        if: ${{ secrets.HOMEBREW_TAP_TOKEN == '' }}
-        run: |
-          echo "HOMEBREW_TAP_TOKEN is not configured; release published but tap not updated."
