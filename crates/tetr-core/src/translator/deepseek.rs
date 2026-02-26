@@ -11,6 +11,14 @@ const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
+const TERMINAL_TRANSLATION_SYSTEM_PROMPT: &str = r#"你是专业的终端输出翻译助手，负责将英文命令行输出实时翻译为中文。
+要求：
+1. 只输出译文，不要解释、总结、注释、前后缀或额外说明。
+2. 命令、参数、路径、文件名、URL、IP、端口、环境变量、代码、错误码、日志标识符必须保持原样，不翻译、不改写。
+3. 保持原始结构：行序、换行、缩进、列表层级、符号尽量与输入一致。
+4. 混合内容按片段处理：仅翻译自然语言部分，技术片段保持原文。
+5. 术语翻译应简洁、准确、统一；不确定时保留原文。
+6. 禁止臆测或补充输入中不存在的信息。"#;
 
 #[derive(Debug, Clone)]
 pub struct DeepSeekTranslator {
@@ -115,20 +123,7 @@ impl Translator for DeepSeekTranslator {
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<TranslationMeta, TranslateError> {
         let started = Instant::now();
-        let body = json!({
-            "model": self.model,
-            "stream": true,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "你是终端翻译助手。请将英文终端输出翻译成简洁自然的中文，保持命令、路径、代码、错误码原样不变。"
-                },
-                {
-                    "role": "user",
-                    "content": input
-                }
-            ]
-        });
+        let body = build_stream_request_body(&self.model, input);
 
         let response = self
             .client
@@ -169,6 +164,23 @@ impl Translator for DeepSeekTranslator {
             truncated: false,
         })
     }
+}
+
+fn build_stream_request_body(model: &str, input: &str) -> serde_json::Value {
+    json!({
+        "model": model,
+        "stream": true,
+        "messages": [
+            {
+                "role": "system",
+                "content": TERMINAL_TRANSLATION_SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": input
+            }
+        ]
+    })
 }
 
 fn read_env_chain(keys: &[&str]) -> Option<String> {
@@ -300,5 +312,17 @@ mod tests {
             }
             _ => panic!("expected http status error"),
         }
+    }
+
+    #[test]
+    fn builds_stream_request_with_terminal_prompt() {
+        let body = build_stream_request_body("deepseek-chat", "ls -la");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["model"], "deepseek-chat");
+        assert_eq!(
+            body["messages"][0]["content"],
+            TERMINAL_TRANSLATION_SYSTEM_PROMPT
+        );
+        assert_eq!(body["messages"][1]["content"], "ls -la");
     }
 }
