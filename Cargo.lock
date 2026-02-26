@@ -4027,7 +4027,7 @@ dependencies = [
 
 [[package]]
 name = "tetr-cli"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -4043,7 +4043,7 @@ dependencies = [
 
 [[package]]
 name = "tetr-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -4059,8 +4059,10 @@ dependencies = [
 
 [[package]]
 name = "tetr-ui"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
+ "core-foundation",
+ "core-graphics",
  "serde",
  "serde_json",
  "tauri",

@@ -12,6 +12,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
+#[cfg(target_os = "macos")]
+use core_foundation::base::{CFType, TCFType};
+#[cfg(target_os = "macos")]
+use core_foundation::dictionary::CFDictionary;
+#[cfg(target_os = "macos")]
+use core_foundation::number::CFNumber;
+#[cfg(target_os = "macos")]
+use core_foundation::string::CFString;
+#[cfg(target_os = "macos")]
+use core_graphics::window;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct IpcEnvelope {
     event: String,
@@ -66,7 +77,16 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_always_on_top(true);
                 let _ = window.set_decorations(true);
-                let _ = pin_window_to_bottom(&window);
+
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = window.hide();
+                }
+
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = pin_window_to_bottom(&window);
+                }
             }
 
             #[cfg(target_os = "macos")]
@@ -140,6 +160,7 @@ fn main() {
         .expect("error while running tetr-ui");
 }
 
+#[cfg(not(target_os = "macos"))]
 fn pin_window_to_bottom(window: &tauri::WebviewWindow) -> tauri::Result<()> {
     let monitor = match window.current_monitor()? {
         Some(monitor) => monitor,
@@ -167,16 +188,23 @@ enum FrontAppLayout {
         width: u32,
         height: u32,
     },
-    UnsupportedTerminal,
     OtherApp,
+    TerminalWithoutBounds,
     Unknown,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+struct FrontAppInfo {
+    bundle_id: String,
+    pid: i32,
 }
 
 #[cfg(target_os = "macos")]
 fn start_macos_window_tracker(app_handle: tauri::AppHandle) {
     thread::spawn(move || {
         let mut last_geometry: Option<(i32, i32, u32, u32)> = None;
-        let mut hidden = false;
+        let mut hidden = true;
 
         loop {
             let Some(window) = app_handle.get_webview_window("main") else {
@@ -206,70 +234,52 @@ fn start_macos_window_tracker(app_handle: tauri::AppHandle) {
                         last_geometry = Some(desired);
                     }
                 }
-                FrontAppLayout::UnsupportedTerminal => {
-                    if hidden {
-                        let _ = window.show();
-                        hidden = false;
-                    }
-                    let _ = pin_window_to_bottom(&window);
-                }
                 FrontAppLayout::OtherApp => {
                     if !hidden {
                         let _ = window.hide();
                         hidden = true;
                     }
                 }
-                FrontAppLayout::Unknown => {
-                    if hidden {
-                        let _ = window.show();
-                        hidden = false;
+                FrontAppLayout::TerminalWithoutBounds | FrontAppLayout::Unknown => {
+                    if last_geometry.is_none() && !hidden {
+                        let _ = window.hide();
+                        hidden = true;
                     }
-                    let _ = pin_window_to_bottom(&window);
                 }
             }
 
-            thread::sleep(Duration::from_millis(250));
+            thread::sleep(Duration::from_millis(220));
         }
     });
 }
 
 #[cfg(target_os = "macos")]
 fn query_front_app_layout() -> FrontAppLayout {
-    let Some(front_bundle_id) = front_app_bundle_id() else {
+    let Some(front) = front_app_info() else {
         return FrontAppLayout::Unknown;
     };
 
-    if !is_terminal_bundle(&front_bundle_id) {
+    if !is_terminal_bundle(&front.bundle_id) {
         return FrontAppLayout::OtherApp;
     }
 
-    let bounds = if front_bundle_id == "com.apple.Terminal" {
-        query_terminal_bounds()
-    } else if front_bundle_id == "com.googlecode.iterm2" {
-        query_iterm_bounds()
-    } else {
-        None
+    let Some((x, y, width, height)) = query_window_bounds_for_pid(front.pid) else {
+        return FrontAppLayout::TerminalWithoutBounds;
     };
 
-    let Some((x1, y1, x2, y2)) = bounds else {
-        return FrontAppLayout::UnsupportedTerminal;
-    };
-
-    let term_width = (x2 - x1).max(220) as u32;
-    let term_height = (y2 - y1).max(240);
-    let panel_height = ((term_height as f32 * 0.34).round() as i32).clamp(180, 320);
-    let panel_y = y2 - panel_height;
+    let panel_height = ((height as f32 * 0.34).round() as i32).clamp(180, 320);
+    let panel_y = y + height - panel_height;
 
     FrontAppLayout::TerminalBounds {
-        x: x1,
+        x,
         y: panel_y,
-        width: term_width,
+        width: width as u32,
         height: panel_height as u32,
     }
 }
 
 #[cfg(target_os = "macos")]
-fn front_app_bundle_id() -> Option<String> {
+fn front_app_info() -> Option<FrontAppInfo> {
     let front_output = Command::new("lsappinfo").arg("front").output().ok()?;
     if !front_output.status.success() {
         return None;
@@ -282,7 +292,7 @@ fn front_app_bundle_id() -> Option<String> {
         .map(str::trim)?;
 
     let info_output = Command::new("lsappinfo")
-        .args(["info", "-only", "bundleid", asn])
+        .args(["info", "-only", "bundleid,pid", asn])
         .output()
         .ok()?;
     if !info_output.status.success() {
@@ -290,6 +300,10 @@ fn front_app_bundle_id() -> Option<String> {
     }
 
     let info_text = String::from_utf8_lossy(&info_output.stdout);
+
+    let mut bundle_id: Option<String> = None;
+    let mut pid: Option<i32> = None;
+
     for line in info_text.lines() {
         if line.contains("CFBundleIdentifier") {
             let mut segments = line.split('"');
@@ -298,12 +312,24 @@ fn front_app_bundle_id() -> Option<String> {
             let _ = segments.next();
             let value = segments.next()?.trim();
             if !value.is_empty() {
-                return Some(value.to_string());
+                bundle_id = Some(value.to_string());
+            }
+        }
+
+        if line.contains("pid") {
+            let digits: String = line.chars().filter(|ch| ch.is_ascii_digit()).collect();
+            if !digits.is_empty() {
+                if let Ok(parsed) = digits.parse::<i32>() {
+                    pid = Some(parsed);
+                }
             }
         }
     }
 
-    None
+    Some(FrontAppInfo {
+        bundle_id: bundle_id?,
+        pid: pid?,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -320,54 +346,100 @@ fn is_terminal_bundle(bundle_id: &str) -> bool {
             | "co.zeit.hyper"
             | "org.tabby"
             | "com.github.rprichard.cygnus"
+            | "com.openai.codex"
+            | "com.anthropic.claude"
+            | "com.anthropic.claudecode"
     )
 }
 
 #[cfg(target_os = "macos")]
-fn query_terminal_bounds() -> Option<(i32, i32, i32, i32)> {
-    let script = r#"
-tell application "Terminal"
-  if (count of windows) is 0 then return ""
-  set b to bounds of front window
-  return (item 1 of b) & "|" & (item 2 of b) & "|" & (item 3 of b) & "|" & (item 4 of b)
-end tell
-"#;
-    query_bounds_by_script(script)
+fn query_window_bounds_for_pid(pid: i32) -> Option<(i32, i32, i32, i32)> {
+    let window_ids = window::create_window_list(
+        window::kCGWindowListOptionOnScreenOnly | window::kCGWindowListExcludeDesktopElements,
+        window::kCGNullWindowID,
+    )?;
+
+    let descriptions = window::create_description_from_array(window_ids)?;
+
+    let key_owner_pid = unsafe { CFString::wrap_under_get_rule(window::kCGWindowOwnerPID) };
+    let key_layer = unsafe { CFString::wrap_under_get_rule(window::kCGWindowLayer) };
+    let key_bounds = unsafe { CFString::wrap_under_get_rule(window::kCGWindowBounds) };
+
+    let key_x = CFString::from_static_string("X");
+    let key_y = CFString::from_static_string("Y");
+    let key_w = CFString::from_static_string("Width");
+    let key_h = CFString::from_static_string("Height");
+
+    let mut best: Option<(i32, i32, i32, i32, i64)> = None;
+
+    for dict in &descriptions {
+        let Some(owner_pid) = dict
+            .find(&key_owner_pid)
+            .and_then(|v| v.downcast::<CFNumber>())
+            .and_then(|n| n.to_i64())
+        else {
+            continue;
+        };
+
+        if owner_pid != pid as i64 {
+            continue;
+        }
+
+        let layer = dict
+            .find(&key_layer)
+            .and_then(|v| v.downcast::<CFNumber>())
+            .and_then(|n| n.to_i64())
+            .unwrap_or(0);
+
+        if layer != 0 {
+            continue;
+        }
+
+        let Some(bounds_untyped) = dict
+            .find(&key_bounds)
+            .and_then(|v| v.downcast::<CFDictionary>())
+        else {
+            continue;
+        };
+
+        let bounds_dict: CFDictionary<CFString, CFType> =
+            unsafe { CFDictionary::wrap_under_get_rule(bounds_untyped.as_concrete_TypeRef()) };
+
+        let Some(x) = cf_number_from_dict(&bounds_dict, &key_x) else {
+            continue;
+        };
+        let Some(y) = cf_number_from_dict(&bounds_dict, &key_y) else {
+            continue;
+        };
+        let Some(w) = cf_number_from_dict(&bounds_dict, &key_w) else {
+            continue;
+        };
+        let Some(h) = cf_number_from_dict(&bounds_dict, &key_h) else {
+            continue;
+        };
+
+        if w < 200.0 || h < 120.0 {
+            continue;
+        }
+
+        let x = x.round() as i32;
+        let y = y.round() as i32;
+        let w = w.round() as i32;
+        let h = h.round() as i32;
+
+        let area = i64::from(w) * i64::from(h);
+        if best.is_none_or(|(_, _, _, _, best_area)| area > best_area) {
+            best = Some((x, y, w, h, area));
+        }
+    }
+
+    best.map(|(x, y, w, h, _)| (x, y, w, h))
 }
 
 #[cfg(target_os = "macos")]
-fn query_iterm_bounds() -> Option<(i32, i32, i32, i32)> {
-    let script = r#"
-tell application "iTerm2"
-  if (count of windows) is 0 then return ""
-  set b to bounds of current window
-  return (item 1 of b) & "|" & (item 2 of b) & "|" & (item 3 of b) & "|" & (item 4 of b)
-end tell
-"#;
-    query_bounds_by_script(script)
-}
-
-#[cfg(target_os = "macos")]
-fn query_bounds_by_script(script: &str) -> Option<(i32, i32, i32, i32)> {
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let line = raw.trim();
-    if line.is_empty() {
-        return None;
-    }
-
-    let mut parts = line.split('|');
-    let x1 = parts.next()?.trim().parse::<i32>().ok()?;
-    let y1 = parts.next()?.trim().parse::<i32>().ok()?;
-    let x2 = parts.next()?.trim().parse::<i32>().ok()?;
-    let y2 = parts.next()?.trim().parse::<i32>().ok()?;
-    Some((x1, y1, x2, y2))
+fn cf_number_from_dict(dict: &CFDictionary<CFString, CFType>, key: &CFString) -> Option<f64> {
+    let number = dict.find(key)?.downcast::<CFNumber>()?;
+    number
+        .to_f64()
+        .or_else(|| number.to_i64().map(|v| v as f64))
 }
