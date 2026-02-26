@@ -25,7 +25,7 @@
 ### 1. 安装依赖（开发环境）
 ```bash
 pnpm --dir apps/tetr-ui install
-cargo build -p tetr-cli
+cargo build -p tetr-cli -p tetr-ui
 ```
 
 ### 2. Homebrew 安装（给其他用户）
@@ -186,11 +186,11 @@ cargo build -p tetr-ui
 ```
 
 ## 发布给 Homebrew（维护者）
-仓库已包含自动发布工作流：`[release-homebrew.yml](/Users/colin/开发/插件工具/TerminalTranslation/.github/workflows/release-homebrew.yml)`  
+仓库已包含自动发布工作流：[`.github/workflows/release-homebrew.yml`](./.github/workflows/release-homebrew.yml)  
 触发方式：推送 `v*` 标签（例如 `v0.1.0`）。
 
 工作流会自动完成：
-1. 构建 macOS `arm64` 与 `x86_64` 二进制包（含 `tetr`、`tetr-ui`）
+1. 构建 macOS `arm64` 二进制包（含 `tetr`、`tetr-ui`）
 2. 发布 GitHub Release 附件
 3. 生成 `SHA256SUMS.txt`
 4. 更新 `homebrew-tap` 仓库中的 `Formula/tetr.rb`（需要密钥）
