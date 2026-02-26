@@ -27,6 +27,8 @@ type StartedPayload = {
 
 type SessionStartedPayload = {
   provider?: string;
+  uiHistoryEnabled?: boolean;
+  uiSourceEnabled?: boolean;
 };
 
 type UiEnvelope = {
@@ -141,6 +143,12 @@ export default function App() {
         case "session.started": {
           const data = payload as SessionStartedPayload;
           setProvider(data.provider ?? "-");
+          if (typeof data.uiHistoryEnabled === "boolean") {
+            setHistoryEnabled(data.uiHistoryEnabled);
+          }
+          if (typeof data.uiSourceEnabled === "boolean") {
+            setSourceEnabled(data.uiSourceEnabled);
+          }
           setStatus("会话已启动");
           break;
         }

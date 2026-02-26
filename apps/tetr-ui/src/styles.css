@@ -1,16 +1,11 @@
 :root {
   --text: #f3f6ff;
   --muted: #99a7c2;
-  --line: rgba(148, 163, 184, 0.3);
-  --bg: linear-gradient(
-      135deg,
-      rgba(14, 19, 32, 0.95) 0%,
-      rgba(17, 25, 45, 0.9) 55%,
-      rgba(15, 24, 39, 0.9) 100%
-    ),
-    rgba(14, 18, 30, 0.9);
-  --card: rgba(255, 255, 255, 0.05);
-  --card-strong: rgba(255, 255, 255, 0.08);
+  --line: #2d3c59;
+  --bg: #121b2d;
+  --bg-soft: #172238;
+  --card: #1a2740;
+  --card-strong: #223250;
   --accent: #4cc2ff;
   --success: #55d49f;
   --danger: #ff8f87;
@@ -27,7 +22,7 @@ body,
   width: 100%;
   height: 100%;
   color: var(--text);
-  background: transparent;
+  background: var(--bg);
   font-family: "SF Pro Text", "PingFang SC", "Segoe UI", sans-serif;
 }
 
@@ -44,7 +39,6 @@ body {
   border-radius: 12px;
   border: 1px solid var(--line);
   background: var(--bg);
-  backdrop-filter: blur(18px) saturate(140%);
   overflow: hidden;
 }
 
@@ -55,7 +49,7 @@ body {
   gap: 10px;
   padding: 9px 12px;
   border-bottom: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--bg-soft);
 }
 
 .header-left {
@@ -119,8 +113,8 @@ body {
   height: 22px;
   padding: 0 9px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+  background: #1b2a44;
   color: var(--muted);
   font-size: 10px;
   cursor: pointer;
@@ -128,18 +122,18 @@ body {
 }
 
 .toggle-btn.on {
-  border-color: rgba(76, 194, 255, 0.45);
+  border-color: #2d8cc4;
   color: var(--accent);
-  background: rgba(76, 194, 255, 0.12);
+  background: #1f3857;
 }
 
 .stop-btn {
-  border-color: rgba(255, 143, 135, 0.5);
+  border-color: #7f4b48;
   color: #ffc3be;
 }
 
 .stop-btn:hover {
-  background: rgba(255, 143, 135, 0.16);
+  background: #3a2b34;
 }
 
 .active-translation {
@@ -205,13 +199,13 @@ body {
   border: 1px solid transparent;
   border-radius: 8px;
   padding: 7px 8px;
-  background: rgba(255, 255, 255, 0.02);
+  background: #1a2740;
   transition: border-color 0.12s ease, background 0.12s ease;
 }
 
 .aligned-row.active {
-  border-color: rgba(76, 194, 255, 0.48);
-  background: rgba(76, 194, 255, 0.08);
+  border-color: #2d8cc4;
+  background: #1f3653;
 }
 
 .aligned-cell {
@@ -235,7 +229,7 @@ body {
 }
 
 .aligned-empty {
-  border: 1px dashed rgba(148, 163, 184, 0.35);
+  border: 1px dashed #3d4d6b;
   border-radius: 8px;
   padding: 12px;
   text-align: center;
@@ -268,7 +262,7 @@ body {
   border-top: 1px solid var(--line);
   padding: 8px 12px;
   overflow: auto;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--bg-soft);
 }
 
 .panel.with-history .active-translation {
@@ -297,7 +291,7 @@ body {
 
 .history li {
   padding: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid #2a3b5d;
   border-radius: 8px;
   background: var(--card-strong);
 }

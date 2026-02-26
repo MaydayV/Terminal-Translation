@@ -66,6 +66,8 @@ struct AppConfig {
     openai_base_url: String,
     openai_model: String,
     ui_bin: Option<String>,
+    ui_history_enabled: Option<bool>,
+    ui_source_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -85,6 +87,8 @@ struct PersistedConfig {
     truncation_tail_lines: Option<usize>,
     truncation_max_error_lines: Option<usize>,
     ui_bin: Option<String>,
+    ui_history_enabled: Option<bool>,
+    ui_source_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -212,7 +216,7 @@ fn main() -> Result<()> {
             Ok(ipc) => match spawn_ui_process(ipc.port(), cfg.ui_bin.as_deref()) {
                 Ok(child) => {
                     ui_child = Some(child);
-                    ipc.send_event("session.started", json!({ "provider": cfg.provider }));
+                    ipc.send_event("session.started", build_session_started_payload(&cfg));
                     ipc_server = Some(ipc);
                 }
                 Err(err) => {
@@ -366,6 +370,10 @@ impl AppConfig {
             .unwrap_or_else(|| "gpt-4o-mini".to_string());
 
         let ui_bin = read_env_nonempty(&["TETR_UI_BIN"]).or_else(|| file_cfg.ui_bin.clone());
+        let ui_history_enabled =
+            read_env_bool(&["TETR_UI_HISTORY_ENABLED"]).or(file_cfg.ui_history_enabled);
+        let ui_source_enabled =
+            read_env_bool(&["TETR_UI_SOURCE_ENABLED"]).or(file_cfg.ui_source_enabled);
 
         Ok(Self {
             provider,
@@ -378,6 +386,8 @@ impl AppConfig {
             openai_base_url,
             openai_model,
             ui_bin,
+            ui_history_enabled,
+            ui_source_enabled,
         })
     }
 }
@@ -443,6 +453,10 @@ fn read_env_u64(keys: &[&str]) -> Option<u64> {
 
 fn read_env_usize(keys: &[&str]) -> Option<usize> {
     read_env_nonempty(keys).and_then(|v| v.parse::<usize>().ok())
+}
+
+fn read_env_bool(keys: &[&str]) -> Option<bool> {
+    read_env_nonempty(keys).and_then(|v| parse_bool_value(&v))
 }
 
 fn run_config_command(command: CliCommand) -> Result<()> {
@@ -520,6 +534,7 @@ fn run_config_wizard() -> Result<()> {
         println!("7) 查看当前配置");
         println!("8) 清除一个配置项");
         println!("9) 显示配置文件路径");
+        println!("10) 设置 UI 默认显示项（记录/原文）");
         println!("0) 退出");
 
         let choice = prompt_line("请选择: ")?;
@@ -560,6 +575,10 @@ fn run_config_wizard() -> Result<()> {
             }
             "9" => {
                 println!("配置文件: {}", config_file_path()?.display());
+            }
+            "10" => {
+                configure_ui_defaults(&mut cfg)?;
+                save_persisted_config(&cfg)?;
             }
             "0" | "q" | "quit" | "exit" => {
                 println!("已退出配置向导");
@@ -713,6 +732,38 @@ fn configure_unset_key(cfg: &mut PersistedConfig) -> Result<()> {
     Ok(())
 }
 
+fn configure_ui_defaults(cfg: &mut PersistedConfig) -> Result<()> {
+    println!("设置 UI 默认显示项（直接回车表示保持当前值）");
+
+    let history_current = cfg
+        .ui_history_enabled
+        .map(|v| if v { "on".to_string() } else { "off".to_string() })
+        .unwrap_or_else(|| "跟随上次 UI 选择(默认)".to_string());
+    let history_input = prompt_line(&format!(
+        "ui_history_enabled [{history_current}] (on/off): "
+    ))?;
+    if !history_input.is_empty() {
+        let parsed = parse_bool_value(&history_input)
+            .ok_or_else(|| anyhow!("ui_history_enabled 仅支持 on/off/true/false/1/0"))?;
+        cfg.ui_history_enabled = Some(parsed);
+    }
+
+    let source_current = cfg
+        .ui_source_enabled
+        .map(|v| if v { "on".to_string() } else { "off".to_string() })
+        .unwrap_or_else(|| "跟随上次 UI 选择(默认)".to_string());
+    let source_input =
+        prompt_line(&format!("ui_source_enabled [{source_current}] (on/off): "))?;
+    if !source_input.is_empty() {
+        let parsed = parse_bool_value(&source_input)
+            .ok_or_else(|| anyhow!("ui_source_enabled 仅支持 on/off/true/false/1/0"))?;
+        cfg.ui_source_enabled = Some(parsed);
+    }
+
+    println!("UI 默认显示项已更新");
+    Ok(())
+}
+
 fn prompt_line(prompt: &str) -> Result<String> {
     print!("{prompt}");
     io::stdout().flush().context("输出提示失败")?;
@@ -825,6 +876,18 @@ fn set_config_value(cfg: &mut PersistedConfig, key: &str, value: &str) -> Result
             cfg.truncation_max_error_lines = Some(value.parse::<usize>().context("必须是整数")?)
         }
         "ui_bin" => cfg.ui_bin = Some(value.to_string()),
+        "ui_history_enabled" => {
+            cfg.ui_history_enabled = Some(
+                parse_bool_value(value)
+                    .ok_or_else(|| anyhow!("ui_history_enabled 仅支持 on/off/true/false/1/0"))?,
+            )
+        }
+        "ui_source_enabled" => {
+            cfg.ui_source_enabled = Some(
+                parse_bool_value(value)
+                    .ok_or_else(|| anyhow!("ui_source_enabled 仅支持 on/off/true/false/1/0"))?,
+            )
+        }
         _ => {
             return Err(anyhow!(
                 "不支持的配置键: {key}。可用键: {}",
@@ -854,6 +917,8 @@ fn unset_config_value(cfg: &mut PersistedConfig, key: &str) -> Result<()> {
         "truncation_tail_lines" => cfg.truncation_tail_lines = None,
         "truncation_max_error_lines" => cfg.truncation_max_error_lines = None,
         "ui_bin" => cfg.ui_bin = None,
+        "ui_history_enabled" => cfg.ui_history_enabled = None,
+        "ui_source_enabled" => cfg.ui_source_enabled = None,
         _ => {
             return Err(anyhow!(
                 "不支持的配置键: {key}。可用键: {}",
@@ -882,6 +947,8 @@ fn get_config_value(cfg: &PersistedConfig, key: &str) -> Result<Option<String>> 
         "truncation_tail_lines" => cfg.truncation_tail_lines.map(|v| v.to_string()),
         "truncation_max_error_lines" => cfg.truncation_max_error_lines.map(|v| v.to_string()),
         "ui_bin" => cfg.ui_bin.clone(),
+        "ui_history_enabled" => cfg.ui_history_enabled.map(|v| v.to_string()),
+        "ui_source_enabled" => cfg.ui_source_enabled.map(|v| v.to_string()),
         _ => {
             return Err(anyhow!(
                 "不支持的配置键: {key}。可用键: {}",
@@ -924,6 +991,8 @@ fn masked_config_for_display(cfg: &PersistedConfig) -> serde_json::Value {
         "truncation_tail_lines": cfg.truncation_tail_lines,
         "truncation_max_error_lines": cfg.truncation_max_error_lines,
         "ui_bin": cfg.ui_bin,
+        "ui_history_enabled": cfg.ui_history_enabled,
+        "ui_source_enabled": cfg.ui_source_enabled,
     })
 }
 
@@ -944,6 +1013,8 @@ fn supported_config_keys() -> Vec<&'static str> {
         "truncation_tail_lines",
         "truncation_max_error_lines",
         "ui_bin",
+        "ui_history_enabled",
+        "ui_source_enabled",
     ]
 }
 
@@ -968,6 +1039,10 @@ fn process_triggered_capture(
 ) {
     let truncated = truncate_for_translation(&triggered.text, truncation_config);
     if truncated.text.trim().is_empty() {
+        return;
+    }
+
+    if !should_translate_text(&truncated.text) {
         return;
     }
 
@@ -1045,6 +1120,30 @@ fn build_translation_started_payload(
         "selectedChars": selected_chars,
         "source": source,
     })
+}
+
+fn build_session_started_payload(cfg: &AppConfig) -> Value {
+    let mut payload = serde_json::Map::new();
+    payload.insert("provider".to_string(), json!(cfg.provider));
+    if let Some(enabled) = cfg.ui_history_enabled {
+        payload.insert("uiHistoryEnabled".to_string(), json!(enabled));
+    }
+    if let Some(enabled) = cfg.ui_source_enabled {
+        payload.insert("uiSourceEnabled".to_string(), json!(enabled));
+    }
+    Value::Object(payload)
+}
+
+fn should_translate_text(input: &str) -> bool {
+    input.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+fn parse_bool_value(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" | "enable" | "enabled" => Some(true),
+        "0" | "false" | "no" | "off" | "disable" | "disabled" => Some(false),
+        _ => None,
+    }
 }
 
 fn detect_terminal_size() -> (u16, u16) {
@@ -1136,7 +1235,10 @@ fn spawn_ui_process(port: u16, configured_ui_bin: Option<&str>) -> Result<Child>
 
 #[cfg(test)]
 mod tests {
-    use super::{build_translation_started_payload, TriggerReason};
+    use super::{
+        build_translation_started_payload, parse_bool_value, set_config_value, should_translate_text,
+        supported_config_keys, PersistedConfig, TriggerReason,
+    };
 
     #[test]
     fn translation_started_payload_includes_source_excerpt() {
@@ -1154,5 +1256,32 @@ mod tests {
             Some(540)
         );
         assert_eq!(payload.get("source").and_then(|v| v.as_str()), Some("line1\nline2"));
+    }
+
+    #[test]
+    fn skips_translation_for_chinese_only_text() {
+        assert!(!should_translate_text("这是中文输出，不需要翻译"));
+        assert!(!should_translate_text("✅ 构建成功，耗时 3 秒"));
+    }
+
+    #[test]
+    fn translates_when_english_is_present() {
+        assert!(should_translate_text("Error: file not found"));
+        assert!(should_translate_text("请求失败，请 retry with sudo"));
+    }
+
+    #[test]
+    fn parses_boolean_values_for_config() {
+        assert_eq!(parse_bool_value("on"), Some(true));
+        assert_eq!(parse_bool_value("false"), Some(false));
+        assert_eq!(parse_bool_value("unknown"), None);
+    }
+
+    #[test]
+    fn supports_ui_history_enabled_key() {
+        let mut cfg = PersistedConfig::default();
+        set_config_value(&mut cfg, "ui_history_enabled", "true").expect("set should succeed");
+        assert_eq!(cfg.ui_history_enabled, Some(true));
+        assert!(supported_config_keys().contains(&"ui_history_enabled"));
     }
 }
