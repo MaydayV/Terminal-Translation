@@ -14,7 +14,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use terminal_size::{terminal_size, Height, Width};
-use tetr_core::capture_state::{CaptureState, TriggerReason, TriggeredCapture};
+use tetr_core::capture_state::{CaptureMode, CaptureState, TriggerReason, TriggeredCapture};
 use tetr_core::pty_bridge::{OutputChunk, PtyBridge};
 use tetr_core::translator::deepseek::DeepSeekTranslator;
 use tetr_core::translator::mock::MockTranslator;
@@ -121,6 +121,8 @@ struct ConnectivityProbeResult {
     delta_count: usize,
     meta: TranslationMeta,
 }
+
+const LATE_COMMAND_GRACE_MS: u64 = 12;
 
 impl IpcServer {
     fn start() -> Result<Self> {
@@ -1284,7 +1286,37 @@ fn ingest_chunk_with_pending_commands(
     now: Instant,
 ) -> Option<TriggeredCapture> {
     drain_pending_commands(capture, command_rx);
-    capture.ingest_chunk(&chunk.raw, &chunk.clean, now)
+    if let Some(triggered) = capture.ingest_chunk(&chunk.raw, &chunk.clean, now) {
+        return Some(triggered);
+    }
+
+    if !should_retry_chunk_for_late_command(capture, chunk) {
+        return None;
+    }
+
+    let Ok(command) = command_rx.recv_timeout(Duration::from_millis(LATE_COMMAND_GRACE_MS)) else {
+        return None;
+    };
+    capture.note_user_command(&command);
+    drain_pending_commands(capture, command_rx);
+    capture.ingest_chunk(&chunk.raw, &chunk.clean, Instant::now())
+}
+
+fn should_retry_chunk_for_late_command(capture: &CaptureState, chunk: &OutputChunk) -> bool {
+    if !matches!(capture.mode(), CaptureMode::Idle) {
+        return false;
+    }
+
+    if !(chunk.clean.contains('\n') || chunk.clean.contains('\r')) {
+        return false;
+    }
+
+    chunk
+        .clean
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+        >= 2
 }
 
 fn handle_output_chunk(
@@ -1822,7 +1854,8 @@ mod tests {
         AppConfig, PersistedConfig, TriggerReason, TriggeredCapture,
     };
     use crossbeam_channel::unbounded;
-    use std::time::Instant;
+    use std::thread;
+    use std::time::{Duration, Instant};
     use tetr_core::capture_state::CaptureState;
     use tetr_core::pty_bridge::OutputChunk;
     use tetr_core::translator::mock::MockTranslator;
@@ -1881,6 +1914,38 @@ mod tests {
             triggered,
             Some(TriggeredCapture {
                 text: "hi".to_string(),
+                reason: TriggerReason::Prompt,
+            })
+        );
+    }
+
+    #[test]
+    fn captures_chunk_when_command_arrives_shortly_after_output_chunk() {
+        let start = Instant::now();
+        let mut capture = CaptureState::new(300);
+        let (command_tx, command_rx) = unbounded();
+
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(2));
+            command_tx
+                .send("curl -s https://api.github.com/zen".to_string())
+                .expect("send should succeed");
+        });
+
+        let chunk = OutputChunk {
+            raw: "curl -s https://api.github.com/zen\r\nAPI rate limit exceeded\r\n$ ".to_string(),
+            clean: "curl -s https://api.github.com/zen\r\nAPI rate limit exceeded\r\n$ ".to_string(),
+        };
+
+        let triggered =
+            ingest_chunk_with_pending_commands(&mut capture, &command_rx, &chunk, start);
+
+        sender.join().expect("sender thread should finish");
+
+        assert_eq!(
+            triggered,
+            Some(TriggeredCapture {
+                text: "API rate limit exceeded".to_string(),
                 reason: TriggerReason::Prompt,
             })
         );
