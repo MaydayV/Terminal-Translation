@@ -2196,6 +2196,32 @@ mod tests {
     }
 
     #[test]
+    fn captures_chunk_when_prompt_sticks_to_output_without_trailing_newline() {
+        let start = Instant::now();
+        let mut capture = CaptureState::new(300);
+        let (_command_tx, command_rx) = unbounded::<String>();
+
+        let chunk = OutputChunk {
+            raw: "curl -s https://api.github.com/zen\r\n{\"message\":\"API rate limit exceeded\"}$ "
+                .to_string(),
+            clean:
+                "curl -s https://api.github.com/zen\r\n{\"message\":\"API rate limit exceeded\"}$ "
+                    .to_string(),
+        };
+
+        let triggered =
+            ingest_chunk_with_pending_commands(&mut capture, &command_rx, &chunk, start);
+
+        assert_eq!(
+            triggered,
+            Some(TriggeredCapture {
+                text: "{\"message\":\"API rate limit exceeded\"}".to_string(),
+                reason: TriggerReason::Prompt,
+            })
+        );
+    }
+
+    #[test]
     fn skips_translation_for_chinese_only_text() {
         assert!(!should_translate_text("这是中文输出，不需要翻译"));
         assert!(!should_translate_text("✅ 构建成功，耗时 3 秒"));

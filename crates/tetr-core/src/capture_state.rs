@@ -112,6 +112,7 @@ impl CaptureState {
             let is_prompt = self.prompt_regex.is_match(&normalized_line);
 
             if matches!(self.mode, CaptureMode::Exec | CaptureMode::Filter) && is_prompt {
+                self.capture_inline_output_before_prompt(&normalized_line);
                 return self.emit(TriggerReason::Prompt);
             }
 
@@ -165,6 +166,26 @@ impl CaptureState {
         // stdin-side command capture can be empty when the shell line was produced via
         // history recall or complex line editing. In that case, skip obvious command echoes.
         self.pending_command.is_none() && looks_like_shell_command_line(normalized_line)
+    }
+
+    fn capture_inline_output_before_prompt(&mut self, normalized_line: &str) {
+        let Some(prefix) = prompt_line_prefix(normalized_line) else {
+            return;
+        };
+        let candidate = prefix.trim();
+        if candidate.is_empty() || looks_like_prompt_inline_prefix(candidate) {
+            return;
+        }
+
+        if !self.command_echo_skipped && self.should_skip_command_echo(candidate) {
+            self.command_echo_skipped = true;
+            self.mode = CaptureMode::Filter;
+            return;
+        }
+
+        self.command_echo_skipped = true;
+        self.mode = CaptureMode::Filter;
+        self.lines.push(candidate.to_string());
     }
 
     fn emit(&mut self, reason: TriggerReason) -> Option<TriggeredCapture> {
@@ -236,6 +257,32 @@ fn strip_ansi_like_control(input: &str) -> String {
     }
 
     output
+}
+
+fn prompt_line_prefix(line: &str) -> Option<&str> {
+    let trimmed = line.trim_end();
+    let (index, last_char) = trimmed.char_indices().last()?;
+    if !matches!(last_char, '$' | '#' | '>' | '❯') {
+        return None;
+    }
+    Some(trimmed[..index].trim_end())
+}
+
+fn looks_like_prompt_inline_prefix(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    if trimmed.starts_with("PS ") {
+        return true;
+    }
+
+    if trimmed.contains('@') && trimmed.contains(':') && !trimmed.contains(' ') {
+        return true;
+    }
+
+    trimmed.ends_with('~') || trimmed.ends_with('/') || trimmed.ends_with('\\')
 }
 
 fn looks_like_shell_command_line(line: &str) -> bool {
@@ -593,5 +640,41 @@ mod tests {
                 reason: TriggerReason::Prompt,
             })
         );
+    }
+
+    #[test]
+    fn captures_output_when_prompt_sticks_to_same_line() {
+        let start = Instant::now();
+        let mut state = CaptureState::new(300);
+
+        state.note_user_command("");
+        let triggered = state.ingest_chunk(
+            "curl -s https://api.github.com/zen\n{\"message\":\"API rate limit exceeded\"}$ ",
+            "curl -s https://api.github.com/zen\n{\"message\":\"API rate limit exceeded\"}$ ",
+            start,
+        );
+
+        assert_eq!(
+            triggered,
+            Some(TriggeredCapture {
+                text: "{\"message\":\"API rate limit exceeded\"}".to_string(),
+                reason: TriggerReason::Prompt,
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_capture_powershell_prompt_inline_prefix_as_output() {
+        let start = Instant::now();
+        let mut state = CaptureState::new(300);
+
+        state.note_user_command("");
+        let triggered = state.ingest_chunk(
+            "echo hi\nPS C:\\Users\\colin> ",
+            "echo hi\nPS C:\\Users\\colin> ",
+            start,
+        );
+
+        assert_eq!(triggered, None);
     }
 }
