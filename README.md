@@ -13,7 +13,9 @@
 - 流式翻译：按增量实时输出译文。
 - 智能触发：提示符触发 + 空闲超时触发。
 - 智能截断：超长输出优先保留错误与尾部关键内容。
+- 智能过滤：自动跳过代码样式行与无意义噪声行，仅翻译有意义文本。
 - 翻译约束：仅翻译英文自然语言；中文、命令、路径、代码、错误码保持原样。
+- 多模型预设：内置 DeepSeek / OpenAI-Compatible / Kimi / 通义千问(Qwen) / Ollama。
 - 配置方式：支持向导配置（`tetr config`）与脚本配置（`tetr set` / `tetr config set`）。
 - 模型连通性测试：支持 `tetr config test` 快速验证当前模型可用性。
 
@@ -88,7 +90,7 @@ tetr config
 ```
 
 建议至少完成以下配置：
-- Provider（`deepseek` / `openai-compatible` / `mock`）
+- Provider（`deepseek` / `openai-compatible` / `kimi` / `qwen` / `ollama` / `mock`）
 - 模型名
 - API Base URL
 - API Key
@@ -156,7 +158,7 @@ tetr config test
 
 ### 模型与 Provider
 
-- `provider`
+- `provider`（支持 `deepseek` / `openai-compatible` / `kimi` / `qwen` / `ollama` / `mock`）
 - `deepseek_model`
 - `openai_model`
 - `model`（通用模型字段）
@@ -258,7 +260,27 @@ tetr config test
 tetr
 ```
 
-### 示例 3：仅调整 UI 样式与高度
+### 示例 3：Kimi / 通义千问 / Ollama 预设
+
+```bash
+# Kimi（月之暗面）
+tetr set provider kimi
+tetr set openai_api_key <YOUR_KIMI_KEY>
+tetr config test
+
+# 通义千问（DashScope OpenAI 兼容）
+tetr set provider qwen
+tetr set openai_api_key <YOUR_QWEN_KEY>
+tetr config test
+
+# Ollama（本地，不需要 API Key）
+tetr set provider ollama
+tetr set openai_base_url http://localhost:11434/v1
+tetr set openai_model qwen2.5:7b
+tetr config test
+```
+
+### 示例 4：仅调整 UI 样式与高度
 
 ```bash
 tetr set ui_font_size 10

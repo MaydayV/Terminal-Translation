@@ -122,7 +122,14 @@ struct ConnectivityProbeResult {
     meta: TranslationMeta,
 }
 
-const LATE_COMMAND_GRACE_MS: u64 = 12;
+const LATE_COMMAND_GRACE_MS: u64 = 120;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProviderPreset {
+    default_base_url: &'static str,
+    default_model: &'static str,
+    requires_api_key: bool,
+}
 
 impl IpcServer {
     fn start() -> Result<Self> {
@@ -335,15 +342,52 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn normalize_provider_name(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "openai" | "compatible" => "openai-compatible".to_string(),
+        "moonshot" => "kimi".to_string(),
+        "tongyi" | "dashscope" => "qwen".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn provider_preset(provider: &str) -> Option<ProviderPreset> {
+    match provider {
+        "openai-compatible" => Some(ProviderPreset {
+            default_base_url: "https://api.openai.com/v1",
+            default_model: "gpt-4o-mini",
+            requires_api_key: true,
+        }),
+        "kimi" => Some(ProviderPreset {
+            default_base_url: "https://api.moonshot.cn/v1",
+            default_model: "moonshot-v1-8k",
+            requires_api_key: true,
+        }),
+        "qwen" => Some(ProviderPreset {
+            default_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            default_model: "qwen-turbo",
+            requires_api_key: true,
+        }),
+        "ollama" => Some(ProviderPreset {
+            default_base_url: "http://localhost:11434/v1",
+            default_model: "qwen2.5:7b",
+            requires_api_key: false,
+        }),
+        _ => None,
+    }
+}
+
 impl AppConfig {
     fn from_sources(cli_provider: Option<String>) -> Result<Self> {
         let file_cfg = load_persisted_config()?;
 
-        let provider = cli_provider
-            .or_else(|| read_env_nonempty(&["TETR_PROVIDER"]))
-            .or_else(|| file_cfg.provider.clone())
-            .unwrap_or_else(|| "deepseek".to_string())
-            .to_ascii_lowercase();
+        let provider = normalize_provider_name(
+            &cli_provider
+                .or_else(|| read_env_nonempty(&["TETR_PROVIDER"]))
+                .or_else(|| file_cfg.provider.clone())
+                .unwrap_or_else(|| "deepseek".to_string()),
+        );
 
         let idle_ms = read_env_u64(&["TETR_TRANSLATE_IDLE_MS"])
             .or(file_cfg.translate_idle_ms)
@@ -387,15 +431,21 @@ impl AppConfig {
                 .or_else(|| file_cfg.openai_api_key.clone())
                 .or_else(|| file_cfg.api_key.clone());
 
+        let openai_preset = provider_preset(&provider).unwrap_or(ProviderPreset {
+            default_base_url: "https://api.openai.com/v1",
+            default_model: "gpt-4o-mini",
+            requires_api_key: true,
+        });
+
         let openai_base_url = read_env_nonempty(&["TETR_OPENAI_BASE_URL", "TETR_API_BASE_URL"])
             .or_else(|| file_cfg.openai_base_url.clone())
             .or_else(|| file_cfg.api_base_url.clone())
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            .unwrap_or_else(|| openai_preset.default_base_url.to_string());
 
         let openai_model = read_env_nonempty(&["TETR_OPENAI_MODEL", "TETR_MODEL"])
             .or_else(|| file_cfg.openai_model.clone())
             .or_else(|| file_cfg.model.clone())
-            .unwrap_or_else(|| "gpt-4o-mini".to_string());
+            .unwrap_or_else(|| openai_preset.default_model.to_string());
 
         let ui_bin = read_env_nonempty(&["TETR_UI_BIN"]).or_else(|| file_cfg.ui_bin.clone());
         let ui_terminal_bundle_ids = read_env_nonempty(&["TETR_UI_TERMINAL_BUNDLE_IDS"])
@@ -457,14 +507,32 @@ fn build_translator(cfg: &AppConfig) -> Result<Box<dyn Translator>> {
             .map_err(map_translate_error)?;
             Ok(Box::new(translator))
         }
-        "openai" | "openai-compatible" | "compatible" => {
-            let api_key = cfg.openai_api_key.clone().ok_or_else(|| {
-                anyhow!(
-                    "缺少兼容 OpenAI 的 API Key，请设置 TETR_OPENAI_API_KEY/TETR_API_KEY/OPENAI_API_KEY 或使用 tetr set"
-                )
+        "openai-compatible" | "kimi" | "qwen" | "ollama" => {
+            let preset = provider_preset(&cfg.provider).ok_or_else(|| {
+                anyhow!("provider {} 未找到预设", cfg.provider)
             })?;
+            let api_key = if preset.requires_api_key {
+                cfg.openai_api_key.clone().ok_or_else(|| {
+                    anyhow!(
+                        "缺少 {} API Key，请设置 TETR_OPENAI_API_KEY/TETR_API_KEY/OPENAI_API_KEY 或使用 tetr set",
+                        cfg.provider
+                    )
+                })?
+            } else {
+                cfg.openai_api_key
+                    .clone()
+                    .unwrap_or_else(|| "ollama-local".to_string())
+            };
+            let provider_name: &'static str = match cfg.provider.as_str() {
+                "openai-compatible" => "openai-compatible",
+                "kimi" => "kimi",
+                "qwen" => "qwen",
+                "ollama" => "ollama",
+                _ => unreachable!("provider validated by match"),
+            };
+
             let translator = DeepSeekTranslator::new(
-                "openai-compatible",
+                provider_name,
                 cfg.openai_base_url.clone(),
                 api_key,
                 cfg.openai_model.clone(),
@@ -475,7 +543,7 @@ fn build_translator(cfg: &AppConfig) -> Result<Box<dyn Translator>> {
         }
         "mock" => Ok(Box::new(MockTranslator)),
         other => Err(anyhow!(
-            "unsupported provider: {other}. available providers: deepseek, openai-compatible, mock"
+            "unsupported provider: {other}. available providers: deepseek, openai-compatible, kimi, qwen, ollama, mock"
         )),
     }
 }
@@ -715,21 +783,30 @@ fn run_config_wizard() -> Result<()> {
 }
 
 fn effective_provider(cfg: &PersistedConfig) -> String {
-    cfg.provider
-        .clone()
-        .unwrap_or_else(|| "deepseek".to_string())
+    normalize_provider_name(
+        cfg.provider
+            .clone()
+            .unwrap_or_else(|| "deepseek".to_string())
+            .as_str(),
+    )
 }
 
 fn configure_provider(cfg: &mut PersistedConfig) -> Result<()> {
     println!("选择 Provider:");
     println!("1) deepseek");
     println!("2) openai-compatible");
-    println!("3) mock");
+    println!("3) kimi（月之暗面）");
+    println!("4) qwen（通义千问）");
+    println!("5) ollama（本地）");
+    println!("6) mock");
     let selected = prompt_line("输入编号: ")?;
     let provider = match selected.as_str() {
         "1" => "deepseek",
         "2" => "openai-compatible",
-        "3" => "mock",
+        "3" => "kimi",
+        "4" => "qwen",
+        "5" => "ollama",
+        "6" => "mock",
         _ => return Err(anyhow!("无效 Provider 选项")),
     };
     cfg.provider = Some(provider.to_string());
@@ -740,7 +817,11 @@ fn configure_provider(cfg: &mut PersistedConfig) -> Result<()> {
 fn configure_provider_model(cfg: &mut PersistedConfig) -> Result<()> {
     let provider = effective_provider(cfg);
     let key = provider_model_key(&provider);
-    let current = get_config_value(cfg, key)?.unwrap_or_else(|| "未设置".to_string());
+    let current = get_config_value(cfg, key)?.unwrap_or_else(|| {
+        provider_preset(&provider)
+            .map(|preset| format!("{}(默认)", preset.default_model))
+            .unwrap_or_else(|| "未设置".to_string())
+    });
     let value = prompt_line(&format!("输入模型（当前 {current}）: "))?;
     if value.is_empty() {
         return Err(anyhow!("模型不能为空"));
@@ -757,7 +838,11 @@ fn configure_provider_base_url(cfg: &mut PersistedConfig) -> Result<()> {
         return Ok(());
     }
     let key = provider_base_url_key(&provider);
-    let current = get_config_value(cfg, key)?.unwrap_or_else(|| "未设置".to_string());
+    let current = get_config_value(cfg, key)?.unwrap_or_else(|| {
+        provider_preset(&provider)
+            .map(|preset| format!("{}(默认)", preset.default_base_url))
+            .unwrap_or_else(|| "未设置".to_string())
+    });
     let value = prompt_line(&format!("输入接口地址（当前 {current}）: "))?;
     if value.is_empty() {
         return Err(anyhow!("接口地址不能为空"));
@@ -769,8 +854,8 @@ fn configure_provider_base_url(cfg: &mut PersistedConfig) -> Result<()> {
 
 fn configure_provider_api_key(cfg: &mut PersistedConfig) -> Result<()> {
     let provider = effective_provider(cfg);
-    if provider == "mock" {
-        println!("mock provider 不需要 API Key");
+    if provider == "mock" || provider == "ollama" {
+        println!("{provider} provider 不需要 API Key");
         return Ok(());
     }
     let key = provider_api_key_key(&provider);
@@ -975,7 +1060,7 @@ fn prompt_line(prompt: &str) -> Result<String> {
 
 fn provider_model_key(provider: &str) -> &'static str {
     match provider {
-        "openai" | "openai-compatible" | "compatible" => "openai_model",
+        "openai-compatible" | "kimi" | "qwen" | "ollama" => "openai_model",
         "mock" => "model",
         _ => "deepseek_model",
     }
@@ -983,14 +1068,14 @@ fn provider_model_key(provider: &str) -> &'static str {
 
 fn provider_base_url_key(provider: &str) -> &'static str {
     match provider {
-        "openai" | "openai-compatible" | "compatible" => "openai_base_url",
+        "openai-compatible" | "kimi" | "qwen" | "ollama" => "openai_base_url",
         _ => "deepseek_base_url",
     }
 }
 
 fn provider_api_key_key(provider: &str) -> &'static str {
     match provider {
-        "openai" | "openai-compatible" | "compatible" => "openai_api_key",
+        "openai-compatible" | "kimi" | "qwen" | "ollama" => "openai_api_key",
         _ => "deepseek_api_key",
     }
 }
@@ -1053,7 +1138,7 @@ fn set_config_value(cfg: &mut PersistedConfig, key: &str, value: &str) -> Result
     }
 
     match key.as_str() {
-        "provider" => cfg.provider = Some(value.to_ascii_lowercase()),
+        "provider" => cfg.provider = Some(normalize_provider_name(value)),
         "translate_idle_ms" | "idle_ms" | "idle" => {
             cfg.translate_idle_ms = Some(value.parse::<u64>().context("idle_ms 必须是整数")?)
         }
@@ -1294,10 +1379,16 @@ fn ingest_chunk_with_pending_commands(
         return None;
     }
 
-    let Ok(command) = command_rx.recv_timeout(Duration::from_millis(LATE_COMMAND_GRACE_MS)) else {
-        return None;
-    };
-    capture.note_user_command(&command);
+    match command_rx.recv_timeout(Duration::from_millis(LATE_COMMAND_GRACE_MS)) {
+        Ok(command) => {
+            capture.note_user_command(&command);
+        }
+        Err(_) => {
+            // Fallback to output-side trigger when command marker is missing or too late.
+            // `CaptureState` still skips obvious command echoes for empty command markers.
+            capture.note_user_command("");
+        }
+    }
     drain_pending_commands(capture, command_rx);
     capture.ingest_chunk(&chunk.raw, &chunk.clean, Instant::now())
 }
@@ -1344,17 +1435,17 @@ fn process_triggered_capture(
         return;
     }
 
-    if !should_translate_text(&truncated.text) {
+    let Some(selected_text) = select_translatable_text(&truncated.text) else {
         return;
-    }
+    };
 
     if let Some(ipc) = ipc {
         let started_payload = build_translation_started_payload(
             triggered.reason,
             truncated.truncated,
             truncated.original_chars,
-            truncated.text.chars().count(),
-            &truncated.text,
+            selected_text.chars().count(),
+            &selected_text,
         );
         ipc.send_event("translation.started", started_payload);
     }
@@ -1367,10 +1458,10 @@ fn process_triggered_capture(
         }
     };
 
-    match translator.stream_translate(&truncated.text, &mut emit_delta) {
+    match translator.stream_translate(&selected_text, &mut emit_delta) {
         Ok(mut meta) => {
             meta.truncated = truncated.truncated;
-            let aligned_translation = align_translation_line_layout(&truncated.text, &assembled);
+            let aligned_translation = align_translation_line_layout(&selected_text, &assembled);
             if let Some(ipc) = ipc {
                 ipc.send_event(
                     "translation.done",
@@ -1446,15 +1537,143 @@ fn build_session_started_payload(cfg: &AppConfig) -> Value {
     Value::Object(payload)
 }
 
+fn select_translatable_text(input: &str) -> Option<String> {
+    let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
+    let mut selected_lines: Vec<String> = Vec::new();
+
+    for line in normalized.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_translation_noise_line(trimmed) || is_code_like_line(trimmed) {
+            continue;
+        }
+        selected_lines.push(trimmed.to_string());
+    }
+
+    if selected_lines.is_empty() {
+        return None;
+    }
+
+    let selected = selected_lines.join("\n");
+    if !should_translate_text(&selected) {
+        return None;
+    }
+
+    Some(selected)
+}
+
 fn should_translate_text(input: &str) -> bool {
-    if input
-        .chars()
-        .any(|ch| ('\u{4E00}'..='\u{9FFF}').contains(&ch))
-    {
+    let has_english = input.chars().any(|ch| ch.is_ascii_alphabetic());
+    if !has_english {
         return false;
     }
 
-    input.chars().any(|ch| ch.is_ascii_alphabetic())
+    let has_chinese = input
+        .chars()
+        .any(|ch| ('\u{4E00}'..='\u{9FFF}').contains(&ch));
+    !has_chinese || has_english
+}
+
+fn is_translation_noise_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    if trimmed
+        .chars()
+        .all(|ch| !ch.is_ascii_alphanumeric() && !ch.is_ascii_alphabetic())
+    {
+        return true;
+    }
+
+    if trimmed.len() <= 20
+        && trimmed.ends_with('%')
+        && trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count() >= 1
+    {
+        return true;
+    }
+
+    false
+}
+
+fn is_code_like_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let starts_with_code_keyword = [
+        "import ",
+        "from ",
+        "export ",
+        "const ",
+        "let ",
+        "var ",
+        "function ",
+        "class ",
+        "def ",
+        "async ",
+        "await ",
+        "return ",
+        "throw ",
+        "yield ",
+        "public ",
+        "private ",
+        "protected ",
+        "static ",
+    ]
+    .iter()
+    .any(|prefix| trimmed.starts_with(prefix));
+
+    if starts_with_code_keyword {
+        return true;
+    }
+
+    if trimmed.starts_with("//")
+        || trimmed.starts_with("#!")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with('@')
+    {
+        return true;
+    }
+
+    if trimmed.starts_with("if (")
+        || trimmed.starts_with("for (")
+        || trimmed.starts_with("while (")
+        || trimmed.starts_with("switch (")
+        || trimmed.starts_with("try {")
+        || trimmed.starts_with("catch (")
+        || trimmed.starts_with("if __name__ ==")
+        || trimmed.starts_with("elif ")
+        || trimmed.starts_with("else:")
+        || trimmed.starts_with("except ")
+        || trimmed.starts_with("finally:")
+    {
+        return true;
+    }
+
+    if trimmed.starts_with('<')
+        && (trimmed.ends_with('>') || trimmed.starts_with("</") || trimmed.starts_with("<!DOCTYPE"))
+    {
+        return true;
+    }
+
+    if matches!(trimmed, "{" | "}" | "(" | ")" | "[" | "]" | "};" | ");") {
+        return true;
+    }
+
+    if trimmed.contains("=>") && (trimmed.contains('{') || trimmed.contains('(')) {
+        return true;
+    }
+
+    if trimmed.ends_with(';')
+        && (trimmed.contains('=') || trimmed.contains("()") || trimmed.contains("::"))
+    {
+        return true;
+    }
+
+    false
 }
 
 fn align_translation_line_layout(source: &str, translation: &str) -> String {
@@ -1848,10 +2067,11 @@ mod tests {
     use super::{
         align_translation_line_layout, build_session_started_payload,
         build_translation_started_payload, ingest_chunk_with_pending_commands,
-        normalize_terminal_bundle_id_list, parse_bool_switch_input, parse_bool_value,
-        parse_ui_bg_color, parse_ui_bg_opacity, parse_ui_font_size, parse_ui_window_height,
-        run_connectivity_probe, set_config_value, should_translate_text, supported_config_keys,
-        AppConfig, PersistedConfig, TriggerReason, TriggeredCapture,
+        normalize_provider_name, normalize_terminal_bundle_id_list, parse_bool_switch_input,
+        parse_bool_value, parse_ui_bg_color, parse_ui_bg_opacity, parse_ui_font_size,
+        parse_ui_window_height, provider_preset, run_connectivity_probe, select_translatable_text,
+        set_config_value, should_translate_text, supported_config_keys, AppConfig, PersistedConfig,
+        TriggerReason, TriggeredCapture,
     };
     use crossbeam_channel::unbounded;
     use std::thread;
@@ -1926,11 +2146,37 @@ mod tests {
         let (command_tx, command_rx) = unbounded();
 
         let sender = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(2));
+            thread::sleep(Duration::from_millis(40));
             command_tx
                 .send("curl -s https://api.github.com/zen".to_string())
                 .expect("send should succeed");
         });
+
+        let chunk = OutputChunk {
+            raw: "curl -s https://api.github.com/zen\r\nAPI rate limit exceeded\r\n$ ".to_string(),
+            clean: "curl -s https://api.github.com/zen\r\nAPI rate limit exceeded\r\n$ "
+                .to_string(),
+        };
+
+        let triggered =
+            ingest_chunk_with_pending_commands(&mut capture, &command_rx, &chunk, start);
+
+        sender.join().expect("sender thread should finish");
+
+        assert_eq!(
+            triggered,
+            Some(TriggeredCapture {
+                text: "API rate limit exceeded".to_string(),
+                reason: TriggerReason::Prompt,
+            })
+        );
+    }
+
+    #[test]
+    fn captures_chunk_when_command_marker_is_missing() {
+        let start = Instant::now();
+        let mut capture = CaptureState::new(300);
+        let (_command_tx, command_rx) = unbounded::<String>();
 
         let chunk = OutputChunk {
             raw: "curl -s https://api.github.com/zen\r\nAPI rate limit exceeded\r\n$ ".to_string(),
@@ -1939,8 +2185,6 @@ mod tests {
 
         let triggered =
             ingest_chunk_with_pending_commands(&mut capture, &command_rx, &chunk, start);
-
-        sender.join().expect("sender thread should finish");
 
         assert_eq!(
             triggered,
@@ -1960,7 +2204,29 @@ mod tests {
     #[test]
     fn translates_when_english_is_present() {
         assert!(should_translate_text("Error: file not found"));
-        assert!(!should_translate_text("请求失败，请 retry with sudo"));
+        assert!(should_translate_text("请求失败，请 retry with sudo"));
+    }
+
+    #[test]
+    fn selects_meaningful_text_and_skips_code_like_lines() {
+        let input = "def hello(name):\n    return name\nError: file not found";
+        assert_eq!(
+            select_translatable_text(input),
+            Some("Error: file not found".to_string())
+        );
+    }
+
+    #[test]
+    fn normalizes_provider_aliases_and_exposes_presets() {
+        assert_eq!(normalize_provider_name("openai"), "openai-compatible");
+        assert_eq!(normalize_provider_name("TongYi"), "qwen");
+        assert_eq!(normalize_provider_name("moonshot"), "kimi");
+        assert_eq!(normalize_provider_name("ollama"), "ollama");
+
+        let ollama = provider_preset("ollama").expect("preset should exist");
+        assert_eq!(ollama.default_base_url, "http://localhost:11434/v1");
+        assert_eq!(ollama.default_model, "qwen2.5:7b");
+        assert!(!ollama.requires_api_key);
     }
 
     #[test]
