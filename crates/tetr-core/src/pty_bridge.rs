@@ -137,20 +137,8 @@ impl PtyBridge {
                     break;
                 }
 
-                match byte[0] {
-                    b'\r' | b'\n' => {
-                        let cmd = normalize_user_command_input(&current_command);
-                        if !cmd.is_empty() {
-                            let _ = command_tx.send(cmd);
-                        }
-                        current_command.clear();
-                    }
-                    8 | 127 => {
-                        current_command.pop();
-                    }
-                    value => {
-                        current_command.push(value);
-                    }
+                if let Some(command) = update_command_buffer(&mut current_command, byte[0]) {
+                    let _ = command_tx.send(command);
                 }
             }
         });
@@ -199,6 +187,24 @@ fn normalize_for_translation_text(input: String) -> String {
         .map(|line| line.trim_end().to_string())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn update_command_buffer(current_command: &mut Vec<u8>, input_byte: u8) -> Option<String> {
+    match input_byte {
+        b'\r' | b'\n' => {
+            let command = normalize_user_command_input(current_command);
+            current_command.clear();
+            Some(command)
+        }
+        8 | 127 => {
+            current_command.pop();
+            None
+        }
+        value => {
+            current_command.push(value);
+            None
+        }
+    }
 }
 
 fn normalize_user_command_input(raw: &[u8]) -> String {
@@ -250,7 +256,9 @@ fn normalize_user_command_input(raw: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_for_translation_text, normalize_user_command_input};
+    use super::{
+        normalize_for_translation_text, normalize_user_command_input, update_command_buffer,
+    };
 
     #[test]
     fn normalizes_windows_line_endings() {
@@ -278,5 +286,18 @@ mod tests {
         let input = "  cd   /Users/colin/开发/插件工具  ".as_bytes();
         let output = normalize_user_command_input(input);
         assert_eq!(output, "cd /Users/colin/开发/插件工具");
+    }
+
+    #[test]
+    fn emits_empty_command_marker_for_enter_after_navigation_only_input() {
+        let mut current_command = Vec::new();
+        for byte in [0x1b, b'[', b'A'] {
+            assert_eq!(update_command_buffer(&mut current_command, byte), None);
+        }
+
+        assert_eq!(
+            update_command_buffer(&mut current_command, b'\n'),
+            Some(String::new())
+        );
     }
 }

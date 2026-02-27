@@ -269,14 +269,13 @@ fn main() -> Result<()> {
 
     let mut running = true;
     while running {
-        while let Ok(command) = bridge.command_rx.try_recv() {
-            capture.note_user_command(&command);
-        }
+        drain_pending_commands(&mut capture, &bridge.command_rx);
 
         match bridge.output_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(chunk) => {
                 handle_output_chunk(
                     &mut capture,
+                    &bridge.command_rx,
                     chunk,
                     translator.as_ref(),
                     &truncation_config,
@@ -1272,15 +1271,32 @@ fn supported_config_keys() -> Vec<&'static str> {
     ]
 }
 
+fn drain_pending_commands(capture: &mut CaptureState, command_rx: &Receiver<String>) {
+    while let Ok(command) = command_rx.try_recv() {
+        capture.note_user_command(&command);
+    }
+}
+
+fn ingest_chunk_with_pending_commands(
+    capture: &mut CaptureState,
+    command_rx: &Receiver<String>,
+    chunk: &OutputChunk,
+    now: Instant,
+) -> Option<TriggeredCapture> {
+    drain_pending_commands(capture, command_rx);
+    capture.ingest_chunk(&chunk.raw, &chunk.clean, now)
+}
+
 fn handle_output_chunk(
     capture: &mut CaptureState,
+    command_rx: &Receiver<String>,
     chunk: OutputChunk,
     translator: &dyn Translator,
     truncation_config: &TruncationConfig,
     ipc: Option<&IpcServer>,
 ) {
     let now = Instant::now();
-    if let Some(triggered) = capture.ingest_chunk(&chunk.raw, &chunk.clean, now) {
+    if let Some(triggered) = ingest_chunk_with_pending_commands(capture, command_rx, &chunk, now) {
         process_triggered_capture(triggered, translator, truncation_config, ipc);
     }
 }
@@ -1799,11 +1815,16 @@ fn spawn_ui_process(
 mod tests {
     use super::{
         align_translation_line_layout, build_session_started_payload,
-        build_translation_started_payload, parse_bool_switch_input, parse_bool_value,
-        normalize_terminal_bundle_id_list, parse_ui_bg_color, parse_ui_bg_opacity,
-        parse_ui_font_size, parse_ui_window_height, run_connectivity_probe, set_config_value,
-        should_translate_text, supported_config_keys, AppConfig, PersistedConfig, TriggerReason,
+        build_translation_started_payload, ingest_chunk_with_pending_commands,
+        normalize_terminal_bundle_id_list, parse_bool_switch_input, parse_bool_value,
+        parse_ui_bg_color, parse_ui_bg_opacity, parse_ui_font_size, parse_ui_window_height,
+        run_connectivity_probe, set_config_value, should_translate_text, supported_config_keys,
+        AppConfig, PersistedConfig, TriggerReason, TriggeredCapture,
     };
+    use crossbeam_channel::unbounded;
+    use std::time::Instant;
+    use tetr_core::capture_state::CaptureState;
+    use tetr_core::pty_bridge::OutputChunk;
     use tetr_core::translator::mock::MockTranslator;
     use tetr_core::translator::{TranslateError, TranslationMeta, Translator};
 
@@ -1836,6 +1857,32 @@ mod tests {
         assert_eq!(
             payload.get("source").and_then(|v| v.as_str()),
             Some("line1\nline2")
+        );
+    }
+
+    #[test]
+    fn captures_chunk_when_pending_command_is_synced_before_ingest() {
+        let start = Instant::now();
+        let mut capture = CaptureState::new(300);
+        let (command_tx, command_rx) = unbounded();
+        command_tx
+            .send("echo hi".to_string())
+            .expect("send should succeed");
+
+        let chunk = OutputChunk {
+            raw: "echo hi\r\nhi\r\n$ ".to_string(),
+            clean: "echo hi\r\nhi\r\n$ ".to_string(),
+        };
+
+        let triggered =
+            ingest_chunk_with_pending_commands(&mut capture, &command_rx, &chunk, start);
+
+        assert_eq!(
+            triggered,
+            Some(TriggeredCapture {
+                text: "hi".to_string(),
+                reason: TriggerReason::Prompt,
+            })
         );
     }
 
