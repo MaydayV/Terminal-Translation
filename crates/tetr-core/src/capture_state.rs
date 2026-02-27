@@ -92,6 +92,15 @@ impl CaptureState {
             return None;
         }
 
+        // Shell echoes characters while the user is typing before pressing Enter.
+        // Those chunks usually have no line terminator and should not start fallback capture.
+        if matches!(self.mode, CaptureMode::Idle)
+            && !chunk_has_line_terminator(clean_chunk)
+            && !self.prompt_regex.is_match(&normalize_shell_text(clean_chunk))
+        {
+            return None;
+        }
+
         self.last_output_at = Some(now);
 
         for line in clean_chunk.split('\n') {
@@ -104,12 +113,6 @@ impl CaptureState {
 
             if matches!(self.mode, CaptureMode::Exec | CaptureMode::Filter) && is_prompt {
                 return self.emit(TriggerReason::Prompt);
-            }
-
-            // Fallback: if command capture failed, still capture output between prompts.
-            if matches!(self.mode, CaptureMode::Idle) && !is_prompt {
-                self.mode = CaptureMode::Filter;
-                self.command_echo_skipped = true;
             }
 
             if !matches!(self.mode, CaptureMode::Exec | CaptureMode::Filter) || is_prompt {
@@ -185,6 +188,10 @@ impl CaptureState {
 
 fn normalize_shell_text(line: &str) -> String {
     line.trim_end_matches('\r').trim().to_string()
+}
+
+fn chunk_has_line_terminator(chunk: &str) -> bool {
+    chunk.contains('\n') || chunk.contains('\r')
 }
 
 fn normalize_command_for_match(raw: &str) -> String {
@@ -498,18 +505,30 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_capture_without_command_echo_tracking() {
+    fn does_not_capture_in_progress_input_before_enter() {
         let start = Instant::now();
         let mut state = CaptureState::new(300);
 
-        let triggered = state.ingest_chunk("hello\n$ ", "hello\n$ ", start);
+        // User is still typing, shell echoes characters without a line terminator.
+        assert_eq!(state.ingest_chunk("tetr", "tetr", start), None);
         assert_eq!(
-            triggered,
-            Some(TriggeredCapture {
-                text: "hello".to_string(),
-                reason: TriggerReason::Prompt,
-            })
+            state.flush_if_idle(start + Duration::from_millis(350)),
+            None
         );
+        assert_eq!(state.mode(), CaptureMode::Idle);
+    }
+
+    #[test]
+    fn does_not_capture_output_without_enter_trigger() {
+        let start = Instant::now();
+        let mut state = CaptureState::new(300);
+
+        assert_eq!(state.ingest_chunk("hello\n$ ", "hello\n$ ", start), None);
+        assert_eq!(
+            state.flush_if_idle(start + Duration::from_millis(350)),
+            None
+        );
+        assert_eq!(state.mode(), CaptureMode::Idle);
     }
 
     #[test]

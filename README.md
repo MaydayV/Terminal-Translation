@@ -177,24 +177,19 @@ tetr config test
 - `truncation_tail_lines`
 - `truncation_max_error_lines`
 
-### UI 默认显示项
-
-- `ui_history_enabled`：默认是否展示“记录区”
-- `ui_source_enabled`：默认是否展示“原文”
-
 ### UI 样式
 
 - `ui_dock_icon`：是否显示 Dock 图标（开/关）
 - `ui_font_size`：字体大小（9-22）
 - `ui_bg_color`：背景色（HEX）
 - `ui_bg_opacity`：背景透明度（0-100）
+- `ui_terminal_bundle_ids`：追加识别的终端 Bundle ID（逗号分隔）
 - `ui_bin`：自定义 `tetr-ui` 可执行文件路径
 
 ### UI 高度
 
 - `ui_window_height`：窗口总高度（80-900）
 - `ui_realtime_height`：实时翻译区高度（80-900）
-- `ui_history_height`：记录区高度（80-900）
 
 说明：
 - 未设置 `ui_window_height` 时，当前默认总高度为固定值（260px），不再按终端高度比例计算。
@@ -221,19 +216,18 @@ tetr config test
 ### UI
 
 - `TETR_UI_BIN`
-- `TETR_UI_HISTORY_ENABLED`
-- `TETR_UI_SOURCE_ENABLED`
 - `TETR_UI_FONT_SIZE`
 - `TETR_UI_BG_COLOR`
 - `TETR_UI_BG_OPACITY`
 - `TETR_UI_WINDOW_HEIGHT`
 - `TETR_UI_REALTIME_HEIGHT`
-- `TETR_UI_HISTORY_HEIGHT`
+- `TETR_UI_TERMINAL_BUNDLE_IDS`：追加识别的终端 Bundle ID（逗号分隔）
 - `TETR_UI_DOCK_ICON`：`1/true/yes/on` 时显示 Dock 图标；默认隐藏
 
 ## macOS 浮窗行为
 
-- 仅当前台是终端应用（Terminal / iTerm2 / WezTerm 等）时显示浮窗。
+- 仅当前台是终端应用（内置识别含 Terminal / iTerm2 / Termius / WezTerm 等）时显示浮窗。
+- 可通过 `ui_terminal_bundle_ids` 或 `TETR_UI_TERMINAL_BUNDLE_IDS` 追加终端 Bundle ID，避免漏识别。
 - 浮窗与终端窗口同宽，并贴在终端下方，跟随移动与缩放。
 - 切换到非终端应用时自动隐藏，减少遮挡。
 - 默认不占用 Dock 图标（可通过 `TETR_UI_DOCK_ICON` 开启）。
@@ -272,7 +266,7 @@ tetr set ui_bg_color '#0f1b2d'
 tetr set ui_bg_opacity 90
 tetr set ui_window_height 300
 tetr set ui_realtime_height 190
-tetr set ui_history_height 110
+tetr set ui_terminal_bundle_ids com.termius.mac,com.example.CustomTerminal
 ```
 
 ## 从源码开发

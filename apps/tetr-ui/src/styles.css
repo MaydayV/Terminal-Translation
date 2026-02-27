@@ -1,9 +1,6 @@
 :root {
   --text: #f3f6ff;
-  --muted: #99a7c2;
-  --line: #2d3c59;
   --bg: #121b2d;
-  --card: #1a2740;
 }
 
 * {
@@ -29,46 +26,26 @@ body {
   width: 100%;
   height: 100%;
   min-height: 0;
-  border-radius: 12px;
-  border: 1px solid var(--line);
   background: var(--window-bg, var(--bg));
-  overflow: hidden;
+  overflow: auto;
   display: flex;
-  flex-direction: column;
+  align-items: stretch;
+  justify-content: stretch;
   backdrop-filter: blur(4px);
 
   /* 调这里即可统一缩放整个翻译窗文字 */
   --window-font-size: 11px;
   font-size: var(--window-font-size);
+  padding: 10px 12px;
 }
 
 .panel * {
   font-size: inherit;
 }
 
-.content-grid {
+.translation-layer {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 8px;
-  display: grid;
-  grid-template-rows: minmax(0, 2fr) minmax(0, 1fr);
-  gap: 6px;
-}
-
-.minimal-content {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-}
-
-.translation-card {
-  flex: 1 1 0;
-  min-height: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--window-card-primary, var(--card));
-  padding: 8px;
   overflow: auto;
 }
 
@@ -77,34 +54,5 @@ body {
   word-break: break-word;
   line-height: 1.45;
   color: var(--text);
-}
-
-.history-card {
-  flex: 1 1 0;
-  min-height: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--window-card-secondary, var(--card));
-  overflow: auto;
-}
-
-.history-item {
-  padding: 6px 8px;
-  border-bottom: 1px solid rgba(153, 167, 194, 0.2);
-}
-
-.history-item:last-child {
-  border-bottom: 0;
-}
-
-.history-text {
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: 1.4;
-  color: var(--text);
-}
-
-.history-empty {
-  padding: 8px;
-  color: var(--muted);
+  min-height: 100%;
 }

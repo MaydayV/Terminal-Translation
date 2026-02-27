@@ -4,6 +4,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
@@ -67,15 +68,13 @@ struct AppConfig {
     openai_base_url: String,
     openai_model: String,
     ui_bin: Option<String>,
-    ui_history_enabled: Option<bool>,
-    ui_source_enabled: Option<bool>,
+    ui_terminal_bundle_ids: Option<String>,
     ui_dock_icon: Option<bool>,
     ui_font_size: Option<u16>,
     ui_bg_color: Option<String>,
     ui_bg_opacity: Option<u8>,
     ui_window_height: Option<u16>,
     ui_realtime_height: Option<u16>,
-    ui_history_height: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -95,15 +94,13 @@ struct PersistedConfig {
     truncation_tail_lines: Option<usize>,
     truncation_max_error_lines: Option<usize>,
     ui_bin: Option<String>,
-    ui_history_enabled: Option<bool>,
-    ui_source_enabled: Option<bool>,
+    ui_terminal_bundle_ids: Option<String>,
     ui_dock_icon: Option<bool>,
     ui_font_size: Option<u16>,
     ui_bg_color: Option<String>,
     ui_bg_opacity: Option<u8>,
     ui_window_height: Option<u16>,
     ui_realtime_height: Option<u16>,
-    ui_history_height: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -241,6 +238,7 @@ fn main() -> Result<()> {
                     cfg.ui_bin.as_deref(),
                     cfg.ui_window_height,
                     cfg.ui_dock_icon,
+                    cfg.ui_terminal_bundle_ids.as_deref(),
                 ) {
                     Ok(child) => {
                         ui_child = Some(child);
@@ -399,10 +397,14 @@ impl AppConfig {
             .unwrap_or_else(|| "gpt-4o-mini".to_string());
 
         let ui_bin = read_env_nonempty(&["TETR_UI_BIN"]).or_else(|| file_cfg.ui_bin.clone());
-        let ui_history_enabled =
-            read_env_bool(&["TETR_UI_HISTORY_ENABLED"]).or(file_cfg.ui_history_enabled);
-        let ui_source_enabled =
-            read_env_bool(&["TETR_UI_SOURCE_ENABLED"]).or(file_cfg.ui_source_enabled);
+        let ui_terminal_bundle_ids = read_env_nonempty(&["TETR_UI_TERMINAL_BUNDLE_IDS"])
+            .and_then(|v| normalize_terminal_bundle_id_list(&v))
+            .or_else(|| {
+                file_cfg
+                    .ui_terminal_bundle_ids
+                    .as_deref()
+                    .and_then(normalize_terminal_bundle_id_list)
+            });
         let ui_dock_icon = read_env_bool(&["TETR_UI_DOCK_ICON"]).or(file_cfg.ui_dock_icon);
         let ui_font_size = read_env_u16(&["TETR_UI_FONT_SIZE"]).or(file_cfg.ui_font_size);
         let ui_bg_color = read_env_nonempty(&["TETR_UI_BG_COLOR"])
@@ -415,8 +417,6 @@ impl AppConfig {
             read_env_u16_height(&["TETR_UI_WINDOW_HEIGHT"]).or(file_cfg.ui_window_height);
         let ui_realtime_height =
             read_env_u16_height(&["TETR_UI_REALTIME_HEIGHT"]).or(file_cfg.ui_realtime_height);
-        let ui_history_height =
-            read_env_u16_height(&["TETR_UI_HISTORY_HEIGHT"]).or(file_cfg.ui_history_height);
 
         Ok(Self {
             provider,
@@ -429,15 +429,13 @@ impl AppConfig {
             openai_base_url,
             openai_model,
             ui_bin,
-            ui_history_enabled,
-            ui_source_enabled,
+            ui_terminal_bundle_ids,
             ui_dock_icon,
             ui_font_size,
             ui_bg_color,
             ui_bg_opacity,
             ui_window_height,
             ui_realtime_height,
-            ui_history_height,
         })
     }
 }
@@ -645,15 +643,14 @@ fn run_config_wizard() -> Result<()> {
         println!("2) 设置当前 Provider 的模型");
         println!("3) 设置当前 Provider 的接口地址");
         println!("4) 设置当前 Provider 的 API Key");
-        println!("5) 设置 UI 默认显示项（记录/原文）");
-        println!("6) 设置 UI 布局尺寸（总高度/实时翻译/记录）");
-        println!("7) 设置 UI 样式（字号/背景色/透明度）");
-        println!("8) 设置触发空闲时间（毫秒）");
-        println!("9) 设置输出截断参数");
-        println!("10) 测试当前模型连通性");
-        println!("11) 查看当前配置");
-        println!("12) 清除一个配置项");
-        println!("13) 显示配置文件路径");
+        println!("5) 设置 UI 布局尺寸（总高度/实时翻译）");
+        println!("6) 设置 UI 样式（字号/背景色/透明度/终端列表）");
+        println!("7) 设置触发空闲时间（毫秒）");
+        println!("8) 设置输出截断参数");
+        println!("9) 测试当前模型连通性");
+        println!("10) 查看当前配置");
+        println!("11) 清除一个配置项");
+        println!("12) 显示配置文件路径");
         println!("0) 退出");
 
         let choice = prompt_line("请选择: ")?;
@@ -675,39 +672,35 @@ fn run_config_wizard() -> Result<()> {
                 save_persisted_config(&cfg)?;
             }
             "5" => {
-                configure_ui_defaults(&mut cfg)?;
-                save_persisted_config(&cfg)?;
-            }
-            "6" => {
                 configure_ui_heights(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
-            "7" => {
+            "6" => {
                 configure_ui_styles(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
-            "8" => {
+            "7" => {
                 configure_idle_ms(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
-            "9" => {
+            "8" => {
                 configure_truncation(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
-            "10" => {
+            "9" => {
                 run_config_connectivity_test()?;
             }
-            "11" => {
+            "10" => {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&masked_config_for_display(&cfg))?
                 );
             }
-            "12" => {
+            "11" => {
                 configure_unset_key(&mut cfg)?;
                 save_persisted_config(&cfg)?;
             }
-            "13" => {
+            "12" => {
                 println!("配置文件: {}", config_file_path()?.display());
             }
             "0" | "q" | "quit" | "exit" => {
@@ -862,37 +855,6 @@ fn configure_unset_key(cfg: &mut PersistedConfig) -> Result<()> {
     Ok(())
 }
 
-fn configure_ui_defaults(cfg: &mut PersistedConfig) -> Result<()> {
-    println!("设置 UI 默认显示项（直接回车表示保持当前值）");
-
-    let history_current = cfg
-        .ui_history_enabled
-        .map(format_bool_switch_state)
-        .unwrap_or_else(|| "跟随上次 UI 选择(默认)".to_string());
-    let history_input = prompt_line(&format!(
-        "翻译记录默认显示 [{history_current}]（1=开，0=关）: "
-    ))?;
-    if !history_input.is_empty() {
-        let parsed = parse_bool_switch_input(&history_input)
-            .ok_or_else(|| anyhow!("翻译记录开关仅支持 1 或 0"))?;
-        cfg.ui_history_enabled = Some(parsed);
-    }
-
-    let source_current = cfg
-        .ui_source_enabled
-        .map(format_bool_switch_state)
-        .unwrap_or_else(|| "跟随上次 UI 选择(默认)".to_string());
-    let source_input = prompt_line(&format!("原文默认显示 [{source_current}]（1=开，0=关）: "))?;
-    if !source_input.is_empty() {
-        let parsed = parse_bool_switch_input(&source_input)
-            .ok_or_else(|| anyhow!("原文开关仅支持 1 或 0"))?;
-        cfg.ui_source_enabled = Some(parsed);
-    }
-
-    println!("UI 默认显示项已更新");
-    Ok(())
-}
-
 fn configure_ui_styles(cfg: &mut PersistedConfig) -> Result<()> {
     println!("设置 UI 样式（直接回车表示保持当前值）");
 
@@ -948,6 +910,22 @@ fn configure_ui_styles(cfg: &mut PersistedConfig) -> Result<()> {
         cfg.ui_bg_opacity = Some(parsed);
     }
 
+    let terminal_bundle_current = cfg
+        .ui_terminal_bundle_ids
+        .clone()
+        .unwrap_or_else(|| "内置列表(默认)".to_string());
+    let terminal_bundle_input = prompt_line(&format!(
+        "附加终端 bundle 列表 ui_terminal_bundle_ids [{terminal_bundle_current}]（逗号分隔，输入 - 清空）: "
+    ))?;
+    if terminal_bundle_input.trim() == "-" {
+        cfg.ui_terminal_bundle_ids = None;
+    } else if !terminal_bundle_input.is_empty() {
+        let parsed = normalize_terminal_bundle_id_list(&terminal_bundle_input).ok_or_else(|| {
+            anyhow!("ui_terminal_bundle_ids 仅支持 bundle id 列表，如 com.termius.mac,com.example.Terminal")
+        })?;
+        cfg.ui_terminal_bundle_ids = Some(parsed);
+    }
+
     println!("UI 样式配置已更新");
     Ok(())
 }
@@ -979,19 +957,6 @@ fn configure_ui_heights(cfg: &mut PersistedConfig) -> Result<()> {
         let parsed = parse_ui_window_height(&realtime_input)
             .ok_or_else(|| anyhow!("ui_realtime_height 仅支持 80-900 的整数"))?;
         cfg.ui_realtime_height = Some(parsed);
-    }
-
-    let history_current = cfg
-        .ui_history_height
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "自动(默认)".to_string());
-    let history_input = prompt_line(&format!(
-        "记录区高度 ui_history_height [{history_current}]（建议 80-900）: "
-    ))?;
-    if !history_input.is_empty() {
-        let parsed = parse_ui_window_height(&history_input)
-            .ok_or_else(|| anyhow!("ui_history_height 仅支持 80-900 的整数"))?;
-        cfg.ui_history_height = Some(parsed);
     }
 
     println!("UI 高度配置已更新");
@@ -1110,16 +1075,14 @@ fn set_config_value(cfg: &mut PersistedConfig, key: &str, value: &str) -> Result
             cfg.truncation_max_error_lines = Some(value.parse::<usize>().context("必须是整数")?)
         }
         "ui_bin" => cfg.ui_bin = Some(value.to_string()),
-        "ui_history_enabled" => {
-            cfg.ui_history_enabled = Some(parse_bool_value(value).ok_or_else(|| {
-                anyhow!("ui_history_enabled 仅支持 1/0（兼容 true/false on/off）")
-            })?)
-        }
-        "ui_source_enabled" => {
-            cfg.ui_source_enabled =
-                Some(parse_bool_value(value).ok_or_else(|| {
-                    anyhow!("ui_source_enabled 仅支持 1/0（兼容 true/false on/off）")
-                })?)
+        "ui_terminal_bundle_ids" => {
+            cfg.ui_terminal_bundle_ids = Some(
+                normalize_terminal_bundle_id_list(value).ok_or_else(|| {
+                    anyhow!(
+                        "ui_terminal_bundle_ids 仅支持 bundle id 列表，如 com.termius.mac,com.googlecode.iterm2"
+                    )
+                })?,
+            )
         }
         "ui_dock_icon" => {
             cfg.ui_dock_icon = Some(
@@ -1157,12 +1120,6 @@ fn set_config_value(cfg: &mut PersistedConfig, key: &str, value: &str) -> Result
                     .ok_or_else(|| anyhow!("ui_realtime_height 仅支持 80-900 的整数"))?,
             )
         }
-        "ui_history_height" | "ui_history_height_px" => {
-            cfg.ui_history_height = Some(
-                parse_ui_window_height(value)
-                    .ok_or_else(|| anyhow!("ui_history_height 仅支持 80-900 的整数"))?,
-            )
-        }
         _ => {
             return Err(anyhow!(
                 "不支持的配置键: {key}。可用键: {}",
@@ -1192,15 +1149,13 @@ fn unset_config_value(cfg: &mut PersistedConfig, key: &str) -> Result<()> {
         "truncation_tail_lines" => cfg.truncation_tail_lines = None,
         "truncation_max_error_lines" => cfg.truncation_max_error_lines = None,
         "ui_bin" => cfg.ui_bin = None,
-        "ui_history_enabled" => cfg.ui_history_enabled = None,
-        "ui_source_enabled" => cfg.ui_source_enabled = None,
+        "ui_terminal_bundle_ids" => cfg.ui_terminal_bundle_ids = None,
         "ui_dock_icon" => cfg.ui_dock_icon = None,
         "ui_font_size" | "ui_font_size_px" => cfg.ui_font_size = None,
         "ui_bg_color" | "ui_background_color" => cfg.ui_bg_color = None,
         "ui_bg_opacity" | "ui_background_opacity" => cfg.ui_bg_opacity = None,
         "ui_window_height" | "ui_window_height_px" => cfg.ui_window_height = None,
         "ui_realtime_height" | "ui_realtime_height_px" => cfg.ui_realtime_height = None,
-        "ui_history_height" | "ui_history_height_px" => cfg.ui_history_height = None,
         _ => {
             return Err(anyhow!(
                 "不支持的配置键: {key}。可用键: {}",
@@ -1229,8 +1184,7 @@ fn get_config_value(cfg: &PersistedConfig, key: &str) -> Result<Option<String>> 
         "truncation_tail_lines" => cfg.truncation_tail_lines.map(|v| v.to_string()),
         "truncation_max_error_lines" => cfg.truncation_max_error_lines.map(|v| v.to_string()),
         "ui_bin" => cfg.ui_bin.clone(),
-        "ui_history_enabled" => cfg.ui_history_enabled.map(|v| v.to_string()),
-        "ui_source_enabled" => cfg.ui_source_enabled.map(|v| v.to_string()),
+        "ui_terminal_bundle_ids" => cfg.ui_terminal_bundle_ids.clone(),
         "ui_dock_icon" => cfg.ui_dock_icon.map(|v| v.to_string()),
         "ui_font_size" | "ui_font_size_px" => cfg.ui_font_size.map(|v| v.to_string()),
         "ui_bg_color" | "ui_background_color" => cfg.ui_bg_color.clone(),
@@ -1238,9 +1192,6 @@ fn get_config_value(cfg: &PersistedConfig, key: &str) -> Result<Option<String>> 
         "ui_window_height" | "ui_window_height_px" => cfg.ui_window_height.map(|v| v.to_string()),
         "ui_realtime_height" | "ui_realtime_height_px" => {
             cfg.ui_realtime_height.map(|v| v.to_string())
-        }
-        "ui_history_height" | "ui_history_height_px" => {
-            cfg.ui_history_height.map(|v| v.to_string())
         }
         _ => {
             return Err(anyhow!(
@@ -1284,15 +1235,13 @@ fn masked_config_for_display(cfg: &PersistedConfig) -> serde_json::Value {
         "truncation_tail_lines": cfg.truncation_tail_lines,
         "truncation_max_error_lines": cfg.truncation_max_error_lines,
         "ui_bin": cfg.ui_bin,
-        "ui_history_enabled": cfg.ui_history_enabled,
-        "ui_source_enabled": cfg.ui_source_enabled,
+        "ui_terminal_bundle_ids": cfg.ui_terminal_bundle_ids,
         "ui_dock_icon": cfg.ui_dock_icon,
         "ui_font_size": cfg.ui_font_size,
         "ui_bg_color": cfg.ui_bg_color,
         "ui_bg_opacity": cfg.ui_bg_opacity,
         "ui_window_height": cfg.ui_window_height,
         "ui_realtime_height": cfg.ui_realtime_height,
-        "ui_history_height": cfg.ui_history_height,
     })
 }
 
@@ -1313,15 +1262,13 @@ fn supported_config_keys() -> Vec<&'static str> {
         "truncation_tail_lines",
         "truncation_max_error_lines",
         "ui_bin",
-        "ui_history_enabled",
-        "ui_source_enabled",
+        "ui_terminal_bundle_ids",
         "ui_dock_icon",
         "ui_font_size",
         "ui_bg_color",
         "ui_bg_opacity",
         "ui_window_height",
         "ui_realtime_height",
-        "ui_history_height",
     ]
 }
 
@@ -1433,12 +1380,6 @@ fn build_translation_started_payload(
 fn build_session_started_payload(cfg: &AppConfig) -> Value {
     let mut payload = serde_json::Map::new();
     payload.insert("provider".to_string(), json!(cfg.provider));
-    if let Some(enabled) = cfg.ui_history_enabled {
-        payload.insert("uiHistoryEnabled".to_string(), json!(enabled));
-    }
-    if let Some(enabled) = cfg.ui_source_enabled {
-        payload.insert("uiSourceEnabled".to_string(), json!(enabled));
-    }
     if let Some(font_size) = cfg.ui_font_size {
         payload.insert("uiFontSizePx".to_string(), json!(font_size));
     }
@@ -1453,9 +1394,6 @@ fn build_session_started_payload(cfg: &AppConfig) -> Value {
     }
     if let Some(height) = cfg.ui_realtime_height {
         payload.insert("uiRealtimeHeightPx".to_string(), json!(height));
-    }
-    if let Some(height) = cfg.ui_history_height {
-        payload.insert("uiHistoryHeightPx".to_string(), json!(height));
     }
     Value::Object(payload)
 }
@@ -1719,6 +1657,39 @@ fn parse_ui_window_height(value: &str) -> Option<u16> {
     }
 }
 
+fn normalize_terminal_bundle_id_list(value: &str) -> Option<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for token in value.split(|ch| matches!(ch, ',' | ';' | '\n')) {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if !is_valid_terminal_bundle_id_token(trimmed) {
+            return None;
+        }
+
+        let lowered = trimmed.to_ascii_lowercase();
+        if seen.insert(lowered.clone()) {
+            normalized.push(lowered);
+        }
+    }
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.join(","))
+    }
+}
+
+fn is_valid_terminal_bundle_id_token(value: &str) -> bool {
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+}
+
 fn detect_terminal_size() -> (u16, u16) {
     let Some((Width(cols), Height(rows))) = terminal_size() else {
         return (80, 24);
@@ -1774,6 +1745,7 @@ fn spawn_ui_process(
     configured_ui_bin: Option<&str>,
     ui_window_height: Option<u16>,
     ui_dock_icon: Option<bool>,
+    ui_terminal_bundle_ids: Option<&str>,
 ) -> Result<Child> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -1805,6 +1777,9 @@ fn spawn_ui_process(
                 if dock_icon_enabled { "1" } else { "0" },
             );
         }
+        if let Some(bundle_ids) = ui_terminal_bundle_ids {
+            command.env("TETR_UI_TERMINAL_BUNDLE_IDS", bundle_ids);
+        }
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1825,9 +1800,9 @@ mod tests {
     use super::{
         align_translation_line_layout, build_session_started_payload,
         build_translation_started_payload, parse_bool_switch_input, parse_bool_value,
-        parse_ui_bg_color, parse_ui_bg_opacity, parse_ui_font_size, parse_ui_window_height,
-        run_connectivity_probe, set_config_value, should_translate_text, supported_config_keys,
-        AppConfig, PersistedConfig, TriggerReason,
+        normalize_terminal_bundle_id_list, parse_ui_bg_color, parse_ui_bg_opacity,
+        parse_ui_font_size, parse_ui_window_height, run_connectivity_probe, set_config_value,
+        should_translate_text, supported_config_keys, AppConfig, PersistedConfig, TriggerReason,
     };
     use tetr_core::translator::mock::MockTranslator;
     use tetr_core::translator::{TranslateError, TranslationMeta, Translator};
@@ -1915,11 +1890,45 @@ mod tests {
     }
 
     #[test]
-    fn supports_ui_history_enabled_key() {
+    fn rejects_removed_history_and_source_config_keys() {
         let mut cfg = PersistedConfig::default();
-        set_config_value(&mut cfg, "ui_history_enabled", "true").expect("set should succeed");
-        assert_eq!(cfg.ui_history_enabled, Some(true));
-        assert!(supported_config_keys().contains(&"ui_history_enabled"));
+        assert!(set_config_value(&mut cfg, "ui_history_enabled", "1").is_err());
+        assert!(set_config_value(&mut cfg, "ui_source_enabled", "1").is_err());
+        assert!(set_config_value(&mut cfg, "ui_history_height", "120").is_err());
+        assert!(!supported_config_keys().contains(&"ui_history_enabled"));
+        assert!(!supported_config_keys().contains(&"ui_source_enabled"));
+        assert!(!supported_config_keys().contains(&"ui_history_height"));
+    }
+
+    #[test]
+    fn supports_terminal_bundle_override_config_key() {
+        let mut cfg = PersistedConfig::default();
+        set_config_value(
+            &mut cfg,
+            "ui_terminal_bundle_ids",
+            "com.termius.mac,com.googlecode.iterm2",
+        )
+        .expect("set should succeed");
+        assert_eq!(
+            cfg.ui_terminal_bundle_ids.as_deref(),
+            Some("com.termius.mac,com.googlecode.iterm2")
+        );
+        assert!(supported_config_keys().contains(&"ui_terminal_bundle_ids"));
+    }
+
+    #[test]
+    fn normalizes_terminal_bundle_override_list() {
+        assert_eq!(
+            normalize_terminal_bundle_id_list(
+                " com.Termius.Mac , com.googlecode.iTerm2 ;\ncom.Termius.Mac "
+            ),
+            Some("com.termius.mac,com.googlecode.iterm2".to_string())
+        );
+        assert_eq!(normalize_terminal_bundle_id_list(""), None);
+        assert_eq!(
+            normalize_terminal_bundle_id_list("com.termius.mac,*invalid*"),
+            None
+        );
     }
 
     #[test]
@@ -1966,14 +1975,11 @@ mod tests {
         let mut cfg = PersistedConfig::default();
         set_config_value(&mut cfg, "ui_window_height", "260").expect("set should succeed");
         set_config_value(&mut cfg, "ui_realtime_height", "180").expect("set should succeed");
-        set_config_value(&mut cfg, "ui_history_height", "120").expect("set should succeed");
 
         assert_eq!(cfg.ui_window_height, Some(260));
         assert_eq!(cfg.ui_realtime_height, Some(180));
-        assert_eq!(cfg.ui_history_height, Some(120));
         assert!(supported_config_keys().contains(&"ui_window_height"));
         assert!(supported_config_keys().contains(&"ui_realtime_height"));
-        assert!(supported_config_keys().contains(&"ui_history_height"));
     }
 
     #[test]
@@ -2012,15 +2018,13 @@ mod tests {
             openai_base_url: String::new(),
             openai_model: String::new(),
             ui_bin: None,
-            ui_history_enabled: None,
-            ui_source_enabled: None,
+            ui_terminal_bundle_ids: None,
             ui_dock_icon: Some(false),
             ui_font_size: Some(10),
             ui_bg_color: Some("#123456".to_string()),
             ui_bg_opacity: Some(82),
             ui_window_height: Some(300),
             ui_realtime_height: Some(180),
-            ui_history_height: Some(110),
         };
 
         let payload = build_session_started_payload(&cfg);
@@ -2043,10 +2047,6 @@ mod tests {
         assert_eq!(
             payload.get("uiRealtimeHeightPx").and_then(|v| v.as_u64()),
             Some(180)
-        );
-        assert_eq!(
-            payload.get("uiHistoryHeightPx").and_then(|v| v.as_u64()),
-            Some(110)
         );
     }
 

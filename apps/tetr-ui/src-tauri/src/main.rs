@@ -6,6 +6,8 @@ use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 #[cfg(target_os = "macos")]
+use std::collections::HashSet;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -437,13 +439,14 @@ fn start_macos_window_tracker(app_handle: tauri::AppHandle) {
         let mut last_geometry: Option<(i32, i32, u32, u32)> = None;
         let mut hidden = true;
         let height_override = read_window_height_override_from_env();
+        let terminal_bundle_overrides = read_terminal_bundle_overrides_from_env();
 
         loop {
             let Some(window) = app_handle.get_webview_window("main") else {
                 break;
             };
 
-            match query_front_app_layout(height_override) {
+            match query_front_app_layout(height_override, &terminal_bundle_overrides) {
                 FrontAppLayout::TerminalBounds {
                     x,
                     y,
@@ -495,12 +498,15 @@ fn set_window_geometry_logical(
 }
 
 #[cfg(target_os = "macos")]
-fn query_front_app_layout(height_override: Option<u32>) -> FrontAppLayout {
+fn query_front_app_layout(
+    height_override: Option<u32>,
+    terminal_bundle_overrides: &[String],
+) -> FrontAppLayout {
     let Some(front) = front_app_info() else {
         return FrontAppLayout::Unknown;
     };
 
-    if !is_terminal_bundle(&front.bundle_id) {
+    if !is_terminal_bundle(&front.bundle_id, terminal_bundle_overrides) {
         return FrontAppLayout::OtherApp;
     }
 
@@ -600,20 +606,63 @@ fn front_app_info() -> Option<FrontAppInfo> {
 }
 
 #[cfg(target_os = "macos")]
-fn is_terminal_bundle(bundle_id: &str) -> bool {
-    matches!(
-        bundle_id,
-        "com.apple.Terminal"
-            | "com.googlecode.iterm2"
-            | "dev.warp.Warp-Stable"
-            | "com.github.wez.wezterm"
-            | "com.mitchellh.ghostty"
-            | "org.alacritty"
-            | "net.kovidgoyal.kitty"
-            | "co.zeit.hyper"
-            | "org.tabby"
-            | "com.github.rprichard.cygnus"
-    )
+fn read_terminal_bundle_overrides_from_env() -> Vec<String> {
+    parse_terminal_bundle_overrides(env::var("TETR_UI_TERMINAL_BUNDLE_IDS").ok().as_deref())
+}
+
+#[cfg(target_os = "macos")]
+fn parse_terminal_bundle_overrides(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    let mut overrides = Vec::new();
+
+    for token in raw.split(|ch| matches!(ch, ',' | ';' | '\n')) {
+        let trimmed = token.trim();
+        if trimmed.is_empty() || !is_valid_terminal_bundle_id(trimmed) {
+            continue;
+        }
+
+        let lowered = trimmed.to_ascii_lowercase();
+        if seen.insert(lowered.clone()) {
+            overrides.push(lowered);
+        }
+    }
+
+    overrides
+}
+
+#[cfg(target_os = "macos")]
+fn is_valid_terminal_bundle_id(value: &str) -> bool {
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+}
+
+#[cfg(target_os = "macos")]
+fn is_terminal_bundle(bundle_id: &str, terminal_bundle_overrides: &[String]) -> bool {
+    const BUILTIN_TERMINAL_BUNDLES: &[&str] = &[
+        "com.apple.terminal",
+        "com.googlecode.iterm2",
+        "com.termius.mac",
+        "dev.warp.warp-stable",
+        "com.github.wez.wezterm",
+        "com.mitchellh.ghostty",
+        "org.alacritty",
+        "net.kovidgoyal.kitty",
+        "co.zeit.hyper",
+        "org.tabby",
+        "com.github.rprichard.cygnus",
+    ];
+
+    let normalized = bundle_id.trim().to_ascii_lowercase();
+
+    BUILTIN_TERMINAL_BUNDLES.contains(&normalized.as_str())
+        || terminal_bundle_overrides
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(&normalized))
 }
 
 #[cfg(target_os = "macos")]
@@ -641,22 +690,36 @@ fn should_show_dock_icon_from_env(raw: Option<&str>) -> bool {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::{
-        compute_panel_geometry, is_terminal_bundle, should_hide_for_layout,
-        should_show_dock_icon_from_env, should_trigger_frontend_reload, FrontAppLayout,
+        compute_panel_geometry, is_terminal_bundle, parse_terminal_bundle_overrides,
+        should_hide_for_layout, should_show_dock_icon_from_env, should_trigger_frontend_reload,
+        FrontAppLayout,
     };
 
     #[test]
     fn recognizes_real_terminal_bundles() {
-        assert!(is_terminal_bundle("com.apple.Terminal"));
-        assert!(is_terminal_bundle("com.googlecode.iterm2"));
-        assert!(is_terminal_bundle("com.github.wez.wezterm"));
+        let overrides: Vec<String> = Vec::new();
+        assert!(is_terminal_bundle("com.apple.Terminal", &overrides));
+        assert!(is_terminal_bundle("com.googlecode.iterm2", &overrides));
+        assert!(is_terminal_bundle("com.github.wez.wezterm", &overrides));
+        assert!(is_terminal_bundle("com.termius.mac", &overrides));
     }
 
     #[test]
     fn does_not_treat_chat_clients_as_terminal_apps() {
-        assert!(!is_terminal_bundle("com.openai.codex"));
-        assert!(!is_terminal_bundle("com.anthropic.claude"));
-        assert!(!is_terminal_bundle("com.anthropic.claudecode"));
+        let overrides: Vec<String> = Vec::new();
+        assert!(!is_terminal_bundle("com.openai.codex", &overrides));
+        assert!(!is_terminal_bundle("com.anthropic.claude", &overrides));
+        assert!(!is_terminal_bundle("com.anthropic.claudecode", &overrides));
+    }
+
+    #[test]
+    fn allows_user_defined_terminal_bundle_overrides() {
+        let overrides = parse_terminal_bundle_overrides(Some(
+            "com.example.Terminal, com.termius.mac ; com.example.Terminal",
+        ));
+        assert!(is_terminal_bundle("com.example.terminal", &overrides));
+        assert!(is_terminal_bundle("com.termius.mac", &overrides));
+        assert!(!is_terminal_bundle("com.random.app", &overrides));
     }
 
     #[test]
