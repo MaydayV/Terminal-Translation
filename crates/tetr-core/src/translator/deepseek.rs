@@ -1,4 +1,6 @@
-use super::{TranslateError, TranslationMeta, Translator};
+use super::{
+    TranslateError, TranslationContentType, TranslationMeta, TranslationRequest, Translator,
+};
 use reqwest::blocking::Client;
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -22,6 +24,11 @@ Requirements:
 7. Preserve line structure strictly: keep the same line order and newline layout as input; translate line by line and do not merge or split lines.
 8. Keep terminology concise, accurate, and consistent. If uncertain, keep the original term.
 9. Never hallucinate or add information not present in the input."#;
+
+const TERMINAL_EXPLAIN_SYSTEM_PROMPT: &str = r#"你是一个终端教学助手，面向完全不懂编程的小白用户。用户会提供他们输入的命令和终端输出。请：
+1）先用一句话解释这个命令是做什么的（如“ls 命令用于列出当前文件夹的内容”）。
+2）再用通俗易懂的中文解释输出内容的含义。
+保留命令名、路径、文件名、参数等技术内容不翻译。简洁明了，不要啰嗦。"#;
 
 #[derive(Debug, Clone)]
 pub struct DeepSeekTranslator {
@@ -122,11 +129,11 @@ impl Translator for DeepSeekTranslator {
 
     fn stream_translate(
         &self,
-        input: &str,
+        request: &TranslationRequest,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<TranslationMeta, TranslateError> {
         let started = Instant::now();
-        let body = build_stream_request_body(&self.model, input);
+        let body = build_stream_request_body(&self.model, request);
 
         let response = self
             .client
@@ -161,7 +168,7 @@ impl Translator for DeepSeekTranslator {
         Ok(TranslationMeta {
             provider: self.provider_name().to_string(),
             model: self.model.clone(),
-            input_chars: input.chars().count(),
+            input_chars: request.input.chars().count(),
             output_chars,
             latency_ms: started.elapsed().as_millis(),
             truncated: false,
@@ -169,21 +176,41 @@ impl Translator for DeepSeekTranslator {
     }
 }
 
-fn build_stream_request_body(model: &str, input: &str) -> serde_json::Value {
+fn build_stream_request_body(model: &str, request: &TranslationRequest) -> serde_json::Value {
+    let (system_prompt, user_content) = match request.content_type {
+        TranslationContentType::Translate => {
+            (TERMINAL_TRANSLATION_SYSTEM_PROMPT, request.input.clone())
+        }
+        TranslationContentType::Explain => (
+            TERMINAL_EXPLAIN_SYSTEM_PROMPT,
+            build_explain_user_content(request),
+        ),
+    };
+
     json!({
         "model": model,
         "stream": true,
         "messages": [
             {
                 "role": "system",
-                "content": TERMINAL_TRANSLATION_SYSTEM_PROMPT
+                "content": system_prompt
             },
             {
                 "role": "user",
-                "content": input
+                "content": user_content
             }
         ]
     })
+}
+
+fn build_explain_user_content(request: &TranslationRequest) -> String {
+    if let Some(command) = request.command.as_ref() {
+        let command = command.trim();
+        if !command.is_empty() {
+            return format!("命令: {command}\n输出:\n{}", request.input);
+        }
+    }
+    request.input.clone()
 }
 
 fn read_env_chain(keys: &[&str]) -> Option<String> {
@@ -276,6 +303,7 @@ struct Delta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::translator::{TranslationContentType, TranslationRequest};
 
     #[test]
     fn parses_stream_delta() {
@@ -319,7 +347,8 @@ mod tests {
 
     #[test]
     fn builds_stream_request_with_terminal_prompt() {
-        let body = build_stream_request_body("deepseek-chat", "ls -la");
+        let body =
+            build_stream_request_body("deepseek-chat", &TranslationRequest::translate("ls -la"));
         assert_eq!(body["stream"], true);
         assert_eq!(body["model"], "deepseek-chat");
         assert_eq!(
@@ -335,5 +364,22 @@ mod tests {
             TERMINAL_TRANSLATION_SYSTEM_PROMPT.contains("Avoid word-for-word literal translation")
         );
         assert!(TERMINAL_TRANSLATION_SYSTEM_PROMPT.contains("idiomatic Chinese"));
+    }
+
+    #[test]
+    fn builds_explain_request_with_command_context() {
+        let request = TranslationRequest {
+            input: "total 8\n-rw-r--r-- file.txt".to_string(),
+            content_type: TranslationContentType::Explain,
+            command: Some("ls -la".to_string()),
+        };
+
+        let body = build_stream_request_body("deepseek-chat", &request);
+        let user_message = body["messages"][1]["content"]
+            .as_str()
+            .expect("user message should be present");
+
+        assert!(user_message.contains("命令: ls -la"));
+        assert!(user_message.contains("输出:"));
     }
 }

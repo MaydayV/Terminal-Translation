@@ -13,6 +13,7 @@ pub enum CaptureMode {
 pub enum TriggerReason {
     Prompt,
     Idle,
+    Manual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +97,9 @@ impl CaptureState {
         // Those chunks usually have no line terminator and should not start fallback capture.
         if matches!(self.mode, CaptureMode::Idle)
             && !chunk_has_line_terminator(clean_chunk)
-            && !self.prompt_regex.is_match(&normalize_shell_text(clean_chunk))
+            && !self
+                .prompt_regex
+                .is_match(&normalize_shell_text(clean_chunk))
         {
             return None;
         }
@@ -148,6 +151,13 @@ impl CaptureState {
         }
 
         self.emit(TriggerReason::Idle)
+    }
+
+    pub fn flush_now(&mut self, reason: TriggerReason) -> Option<TriggeredCapture> {
+        if !matches!(self.mode, CaptureMode::Filter) {
+            return None;
+        }
+        self.emit(reason)
     }
 
     fn is_command_echo(&self, normalized_line: &str) -> bool {
@@ -676,5 +686,30 @@ mod tests {
         );
 
         assert_eq!(triggered, None);
+    }
+
+    #[test]
+    fn can_flush_capture_immediately_for_manual_snap() {
+        let start = Instant::now();
+        let mut state = CaptureState::new(300);
+
+        state.note_user_command("tail -f app.log");
+        assert_eq!(
+            state.ingest_chunk(
+                "tail -f app.log\r\nERROR something bad happened\r\n",
+                "tail -f app.log\r\nERROR something bad happened\r\n",
+                start
+            ),
+            None
+        );
+
+        let triggered = state.flush_now(TriggerReason::Manual);
+        assert_eq!(
+            triggered,
+            Some(TriggeredCapture {
+                text: "ERROR something bad happened".to_string(),
+                reason: TriggerReason::Manual,
+            })
+        );
     }
 }

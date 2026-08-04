@@ -29,12 +29,43 @@ pub enum TranslateError {
     Parse(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TranslationContentType {
+    Translate,
+    Explain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranslationRequest {
+    pub input: String,
+    pub content_type: TranslationContentType,
+    pub command: Option<String>,
+}
+
+impl TranslationRequest {
+    pub fn translate(input: impl Into<String>) -> Self {
+        Self {
+            input: input.into(),
+            content_type: TranslationContentType::Translate,
+            command: None,
+        }
+    }
+
+    pub fn explain(command: impl Into<String>, output: impl Into<String>) -> Self {
+        Self {
+            input: output.into(),
+            content_type: TranslationContentType::Explain,
+            command: Some(command.into()),
+        }
+    }
+}
+
 pub trait Translator: Send + Sync {
     fn provider_name(&self) -> &'static str;
 
     fn stream_translate(
         &self,
-        input: &str,
+        request: &TranslationRequest,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<TranslationMeta, TranslateError>;
 }

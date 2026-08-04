@@ -18,7 +18,9 @@ use tetr_core::capture_state::{CaptureMode, CaptureState, TriggerReason, Trigger
 use tetr_core::pty_bridge::{OutputChunk, PtyBridge};
 use tetr_core::translator::deepseek::DeepSeekTranslator;
 use tetr_core::translator::mock::MockTranslator;
-use tetr_core::translator::{TranslateError, TranslationMeta, Translator};
+use tetr_core::translator::{
+    TranslateError, TranslationContentType, TranslationMeta, TranslationRequest, Translator,
+};
 use tetr_core::truncation::{truncate_for_translation, TruncationConfig};
 
 #[derive(Debug, Parser)]
@@ -275,10 +277,20 @@ fn main() -> Result<()> {
 
     let mut capture = CaptureState::new(cfg.idle_ms);
     let truncation_config = cfg.truncation.clone();
+    let mut paused = false;
+    let mut latest_command_for_explain: Option<String> = None;
+
+    if let Some(ipc) = ipc_server.as_ref() {
+        ipc.send_event("session.control", json!({ "paused": paused }));
+    }
 
     let mut running = true;
     while running {
-        drain_pending_commands(&mut capture, &bridge.command_rx);
+        drain_pending_commands(
+            &mut capture,
+            &bridge.command_rx,
+            &mut latest_command_for_explain,
+        );
 
         match bridge.output_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(chunk) => {
@@ -289,6 +301,8 @@ fn main() -> Result<()> {
                     translator.as_ref(),
                     &truncation_config,
                     ipc_server.as_ref(),
+                    &mut latest_command_for_explain,
+                    paused,
                 );
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
@@ -298,12 +312,15 @@ fn main() -> Result<()> {
         }
 
         if let Some(triggered) = capture.flush_if_idle(Instant::now()) {
-            process_triggered_capture(
-                triggered,
-                translator.as_ref(),
-                &truncation_config,
-                ipc_server.as_ref(),
-            );
+            if !paused {
+                process_triggered_capture(
+                    triggered,
+                    translator.as_ref(),
+                    &truncation_config,
+                    ipc_server.as_ref(),
+                    latest_command_for_explain.take(),
+                );
+            }
         }
 
         if bridge.exit_rx.try_recv().is_ok() {
@@ -312,10 +329,28 @@ fn main() -> Result<()> {
 
         if let Some(ipc) = ipc_server.as_ref() {
             while let Some(control_event) = ipc.try_recv_control() {
-                if control_event == "control.stop" {
-                    bridge.terminate();
-                    running = false;
-                    break;
+                match control_event.as_str() {
+                    "control.stop" => {
+                        bridge.terminate();
+                        running = false;
+                        break;
+                    }
+                    "control.pause-toggle" => {
+                        paused = !paused;
+                        ipc.send_event("session.control", json!({ "paused": paused }));
+                    }
+                    "control.snap" => {
+                        if let Some(triggered) = capture.flush_now(TriggerReason::Manual) {
+                            process_triggered_capture(
+                                triggered,
+                                translator.as_ref(),
+                                &truncation_config,
+                                Some(ipc),
+                                latest_command_for_explain.take(),
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -666,8 +701,9 @@ fn run_connectivity_probe(translator: &dyn Translator) -> Result<ConnectivityPro
         output.push_str(delta);
     };
 
+    let request = TranslationRequest::translate(PROBE_INPUT);
     let meta = translator
-        .stream_translate(PROBE_INPUT, &mut on_delta)
+        .stream_translate(&request, &mut on_delta)
         .map_err(map_translate_error)?;
 
     if delta_count == 0 || output.trim().is_empty() {
@@ -1358,8 +1394,16 @@ fn supported_config_keys() -> Vec<&'static str> {
     ]
 }
 
-fn drain_pending_commands(capture: &mut CaptureState, command_rx: &Receiver<String>) {
+fn drain_pending_commands(
+    capture: &mut CaptureState,
+    command_rx: &Receiver<String>,
+    latest_command_for_explain: &mut Option<String>,
+) {
     while let Ok(command) = command_rx.try_recv() {
+        let trimmed = command.trim();
+        if !trimmed.is_empty() {
+            *latest_command_for_explain = Some(trimmed.to_string());
+        }
         capture.note_user_command(&command);
     }
 }
@@ -1368,9 +1412,10 @@ fn ingest_chunk_with_pending_commands(
     capture: &mut CaptureState,
     command_rx: &Receiver<String>,
     chunk: &OutputChunk,
+    latest_command_for_explain: &mut Option<String>,
     now: Instant,
 ) -> Option<TriggeredCapture> {
-    drain_pending_commands(capture, command_rx);
+    drain_pending_commands(capture, command_rx, latest_command_for_explain);
     if let Some(triggered) = capture.ingest_chunk(&chunk.raw, &chunk.clean, now) {
         return Some(triggered);
     }
@@ -1381,6 +1426,10 @@ fn ingest_chunk_with_pending_commands(
 
     match command_rx.recv_timeout(Duration::from_millis(LATE_COMMAND_GRACE_MS)) {
         Ok(command) => {
+            let trimmed = command.trim();
+            if !trimmed.is_empty() {
+                *latest_command_for_explain = Some(trimmed.to_string());
+            }
             capture.note_user_command(&command);
         }
         Err(_) => {
@@ -1389,7 +1438,7 @@ fn ingest_chunk_with_pending_commands(
             capture.note_user_command("");
         }
     }
-    drain_pending_commands(capture, command_rx);
+    drain_pending_commands(capture, command_rx, latest_command_for_explain);
     capture.ingest_chunk(&chunk.raw, &chunk.clean, Instant::now())
 }
 
@@ -1417,10 +1466,26 @@ fn handle_output_chunk(
     translator: &dyn Translator,
     truncation_config: &TruncationConfig,
     ipc: Option<&IpcServer>,
+    latest_command_for_explain: &mut Option<String>,
+    paused: bool,
 ) {
     let now = Instant::now();
-    if let Some(triggered) = ingest_chunk_with_pending_commands(capture, command_rx, &chunk, now) {
-        process_triggered_capture(triggered, translator, truncation_config, ipc);
+    if let Some(triggered) = ingest_chunk_with_pending_commands(
+        capture,
+        command_rx,
+        &chunk,
+        latest_command_for_explain,
+        now,
+    ) {
+        if !paused {
+            process_triggered_capture(
+                triggered,
+                translator,
+                truncation_config,
+                ipc,
+                latest_command_for_explain.take(),
+            );
+        }
     }
 }
 
@@ -1429,6 +1494,7 @@ fn process_triggered_capture(
     translator: &dyn Translator,
     truncation_config: &TruncationConfig,
     ipc: Option<&IpcServer>,
+    command_for_explain: Option<String>,
 ) {
     let truncated = truncate_for_translation(&triggered.text, truncation_config);
     if truncated.text.trim().is_empty() {
@@ -1458,7 +1524,9 @@ fn process_triggered_capture(
         }
     };
 
-    match translator.stream_translate(&selected_text, &mut emit_delta) {
+    let request = build_translation_request(&selected_text, command_for_explain.as_deref());
+
+    match translator.stream_translate(&request, &mut emit_delta) {
         Ok(mut meta) => {
             meta.truncated = truncated.truncated;
             let aligned_translation = align_translation_line_layout(&selected_text, &assembled);
@@ -1481,22 +1549,99 @@ fn process_triggered_capture(
 }
 
 fn report_translation_error(err: TranslateError, ipc: Option<&IpcServer>) {
+    let friendly_message = friendly_translate_error_message(&err);
     if let Some(ipc) = ipc {
         ipc.send_event(
             "session.error",
             json!({
-                "message": err.to_string(),
+                "message": friendly_message,
+                "detail": err.to_string(),
             }),
         );
     } else {
-        eprintln!("[tetr] translation error: {err}");
+        eprintln!("[tetr] translation error: {friendly_message} | detail: {err}");
     }
+}
+
+fn friendly_translate_error_message(err: &TranslateError) -> String {
+    match err {
+        TranslateError::HttpStatus { status, .. } => match status {
+            401 => "🔑 认证失败（401）：API Key 可能错误、过期或与当前模型不匹配".to_string(),
+            403 => "🚫 权限不足（403）：当前 Key 可能没有该模型的访问权限".to_string(),
+            404 => "❓ 模型或接口不存在（404）：请检查模型名和 Base URL".to_string(),
+            429 => "⏳ 请求过于频繁（429）：触发限流，请稍后重试".to_string(),
+            500 => "💥 服务端错误（500）：上游服务异常，请稍后重试".to_string(),
+            502 | 503 => "🔌 服务暂不可用（502/503）：上游服务可能在维护中".to_string(),
+            _ => format!("❌ API 返回错误状态码（{status}）"),
+        },
+        TranslateError::Request(message) => {
+            if message.to_ascii_lowercase().contains("timed out") {
+                "⏱ 请求超时：请检查网络或稍后重试".to_string()
+            } else {
+                "🌐 网络请求失败：请检查网络连接和 API 地址".to_string()
+            }
+        }
+        TranslateError::Config(message) => format!("⚙️ 配置错误：{message}"),
+        TranslateError::Parse(_) => "🧩 解析模型流式响应失败：请重试或切换模型".to_string(),
+    }
+}
+
+fn build_translation_request(
+    selected_text: &str,
+    command_for_explain: Option<&str>,
+) -> TranslationRequest {
+    if let Some(command) = command_for_explain {
+        let command = command.trim();
+        if !command.is_empty() && should_explain_command(command) {
+            return TranslationRequest {
+                input: selected_text.to_string(),
+                content_type: TranslationContentType::Explain,
+                command: Some(command.to_string()),
+            };
+        }
+    }
+
+    TranslationRequest::translate(selected_text)
+}
+
+fn should_explain_command(command: &str) -> bool {
+    let mut parts = command.split_whitespace();
+    let Some(first) = parts.next() else {
+        return false;
+    };
+
+    let binary = if first == "sudo" {
+        parts.next().unwrap_or("")
+    } else {
+        first
+    };
+    matches!(
+        binary,
+        "ls" | "pwd"
+            | "cd"
+            | "cat"
+            | "grep"
+            | "find"
+            | "echo"
+            | "mkdir"
+            | "rm"
+            | "cp"
+            | "mv"
+            | "touch"
+            | "head"
+            | "tail"
+            | "ps"
+            | "df"
+            | "du"
+            | "whoami"
+    )
 }
 
 fn trigger_reason_text(reason: TriggerReason) -> &'static str {
     match reason {
         TriggerReason::Prompt => "prompt",
         TriggerReason::Idle => "idle",
+        TriggerReason::Manual => "manual",
     }
 }
 
@@ -1537,16 +1682,75 @@ fn build_session_started_payload(cfg: &AppConfig) -> Value {
     Value::Object(payload)
 }
 
-fn select_translatable_text(input: &str) -> Option<String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextSegmentKind {
+    Code,
+    Text,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextSegment {
+    kind: TextSegmentKind,
+    text: String,
+}
+
+fn split_code_and_text_segments(input: &str) -> Vec<TextSegment> {
     let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
-    let mut selected_lines: Vec<String> = Vec::new();
+    let mut segments: Vec<TextSegment> = Vec::new();
+    let mut current_kind: Option<TextSegmentKind> = None;
+    let mut current_lines: Vec<String> = Vec::new();
 
     for line in normalized.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || is_translation_noise_line(trimmed) || is_code_like_line(trimmed) {
+        if trimmed.is_empty() {
             continue;
         }
-        selected_lines.push(trimmed.to_string());
+
+        let kind = if is_code_like_line(trimmed) {
+            TextSegmentKind::Code
+        } else {
+            TextSegmentKind::Text
+        };
+
+        if current_kind != Some(kind) && !current_lines.is_empty() {
+            segments.push(TextSegment {
+                kind: current_kind.expect("segment kind must exist"),
+                text: current_lines.join("\n"),
+            });
+            current_lines.clear();
+        }
+
+        current_kind = Some(kind);
+        current_lines.push(trimmed.to_string());
+    }
+
+    if let Some(kind) = current_kind {
+        if !current_lines.is_empty() {
+            segments.push(TextSegment {
+                kind,
+                text: current_lines.join("\n"),
+            });
+        }
+    }
+
+    segments
+}
+
+fn select_translatable_text(input: &str) -> Option<String> {
+    let mut selected_lines: Vec<String> = Vec::new();
+
+    for segment in split_code_and_text_segments(input) {
+        if segment.kind == TextSegmentKind::Code {
+            continue;
+        }
+
+        for line in segment.text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || is_translation_noise_line(trimmed) {
+                continue;
+            }
+            selected_lines.push(trimmed.to_string());
+        }
     }
 
     if selected_lines.is_empty() {
@@ -2066,12 +2270,13 @@ fn spawn_ui_process(
 mod tests {
     use super::{
         align_translation_line_layout, build_session_started_payload,
-        build_translation_started_payload, ingest_chunk_with_pending_commands,
-        normalize_provider_name, normalize_terminal_bundle_id_list, parse_bool_switch_input,
-        parse_bool_value, parse_ui_bg_color, parse_ui_bg_opacity, parse_ui_font_size,
-        parse_ui_window_height, provider_preset, run_connectivity_probe, select_translatable_text,
-        set_config_value, should_translate_text, supported_config_keys, AppConfig, PersistedConfig,
-        TriggerReason, TriggeredCapture,
+        build_translation_started_payload, friendly_translate_error_message,
+        ingest_chunk_with_pending_commands, normalize_provider_name,
+        normalize_terminal_bundle_id_list, parse_bool_switch_input, parse_bool_value,
+        parse_ui_bg_color, parse_ui_bg_opacity, parse_ui_font_size, parse_ui_window_height,
+        provider_preset, run_connectivity_probe, select_translatable_text, set_config_value,
+        should_translate_text, split_code_and_text_segments, supported_config_keys, AppConfig,
+        PersistedConfig, TextSegmentKind, TriggerReason, TriggeredCapture,
     };
     use crossbeam_channel::unbounded;
     use std::thread;
@@ -2079,7 +2284,7 @@ mod tests {
     use tetr_core::capture_state::CaptureState;
     use tetr_core::pty_bridge::OutputChunk;
     use tetr_core::translator::mock::MockTranslator;
-    use tetr_core::translator::{TranslateError, TranslationMeta, Translator};
+    use tetr_core::translator::{TranslateError, TranslationMeta, TranslationRequest, Translator};
 
     #[test]
     fn translation_started_payload_includes_source_excerpt() {
@@ -2127,8 +2332,14 @@ mod tests {
             clean: "echo hi\r\nhi\r\n$ ".to_string(),
         };
 
-        let triggered =
-            ingest_chunk_with_pending_commands(&mut capture, &command_rx, &chunk, start);
+        let mut latest_command_for_explain = None;
+        let triggered = ingest_chunk_with_pending_commands(
+            &mut capture,
+            &command_rx,
+            &chunk,
+            &mut latest_command_for_explain,
+            start,
+        );
 
         assert_eq!(
             triggered,
@@ -2158,8 +2369,14 @@ mod tests {
                 .to_string(),
         };
 
-        let triggered =
-            ingest_chunk_with_pending_commands(&mut capture, &command_rx, &chunk, start);
+        let mut latest_command_for_explain = None;
+        let triggered = ingest_chunk_with_pending_commands(
+            &mut capture,
+            &command_rx,
+            &chunk,
+            &mut latest_command_for_explain,
+            start,
+        );
 
         sender.join().expect("sender thread should finish");
 
@@ -2180,11 +2397,18 @@ mod tests {
 
         let chunk = OutputChunk {
             raw: "curl -s https://api.github.com/zen\r\nAPI rate limit exceeded\r\n$ ".to_string(),
-            clean: "curl -s https://api.github.com/zen\r\nAPI rate limit exceeded\r\n$ ".to_string(),
+            clean: "curl -s https://api.github.com/zen\r\nAPI rate limit exceeded\r\n$ "
+                .to_string(),
         };
 
-        let triggered =
-            ingest_chunk_with_pending_commands(&mut capture, &command_rx, &chunk, start);
+        let mut latest_command_for_explain = None;
+        let triggered = ingest_chunk_with_pending_commands(
+            &mut capture,
+            &command_rx,
+            &chunk,
+            &mut latest_command_for_explain,
+            start,
+        );
 
         assert_eq!(
             triggered,
@@ -2202,15 +2426,22 @@ mod tests {
         let (_command_tx, command_rx) = unbounded::<String>();
 
         let chunk = OutputChunk {
-            raw: "curl -s https://api.github.com/zen\r\n{\"message\":\"API rate limit exceeded\"}$ "
-                .to_string(),
+            raw:
+                "curl -s https://api.github.com/zen\r\n{\"message\":\"API rate limit exceeded\"}$ "
+                    .to_string(),
             clean:
                 "curl -s https://api.github.com/zen\r\n{\"message\":\"API rate limit exceeded\"}$ "
                     .to_string(),
         };
 
-        let triggered =
-            ingest_chunk_with_pending_commands(&mut capture, &command_rx, &chunk, start);
+        let mut latest_command_for_explain = None;
+        let triggered = ingest_chunk_with_pending_commands(
+            &mut capture,
+            &command_rx,
+            &chunk,
+            &mut latest_command_for_explain,
+            start,
+        );
 
         assert_eq!(
             triggered,
@@ -2234,12 +2465,40 @@ mod tests {
     }
 
     #[test]
+    fn split_code_and_text_keeps_natural_text_segments_only() {
+        let input =
+            "def hello(name):\n    return name\n\nBuild failed at step 3\nPlease check syntax";
+        let segments = split_code_and_text_segments(input);
+        let text_segments: Vec<String> = segments
+            .into_iter()
+            .filter(|segment| matches!(segment.kind, TextSegmentKind::Text))
+            .map(|segment| segment.text)
+            .collect();
+
+        assert_eq!(
+            text_segments,
+            vec!["Build failed at step 3\nPlease check syntax".to_string()]
+        );
+    }
+
+    #[test]
     fn selects_meaningful_text_and_skips_code_like_lines() {
         let input = "def hello(name):\n    return name\nError: file not found";
         assert_eq!(
             select_translatable_text(input),
             Some("Error: file not found".to_string())
         );
+    }
+
+    #[test]
+    fn maps_http_status_errors_to_actionable_messages() {
+        let message = friendly_translate_error_message(&TranslateError::HttpStatus {
+            status: 429,
+            body: "rate limited".to_string(),
+        });
+
+        assert!(message.contains("请求过于频繁"));
+        assert!(message.contains("429"));
     }
 
     #[test]
@@ -2475,13 +2734,13 @@ mod tests {
 
             fn stream_translate(
                 &self,
-                input: &str,
+                request: &TranslationRequest,
                 _on_delta: &mut dyn FnMut(&str),
             ) -> Result<TranslationMeta, TranslateError> {
                 Ok(TranslationMeta {
                     provider: self.provider_name().to_string(),
                     model: "silent-model".to_string(),
-                    input_chars: input.chars().count(),
+                    input_chars: request.input.chars().count(),
                     output_chars: 0,
                     latency_ms: 1,
                     truncated: false,

@@ -2,11 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+#[cfg(target_os = "macos")]
+use std::collections::HashSet;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-#[cfg(target_os = "macos")]
-use std::collections::HashSet;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -177,6 +177,22 @@ fn request_stop(writer: tauri::State<'_, SharedWriter>) -> Result<(), String> {
     writer.send_control("control.stop")
 }
 
+fn is_supported_control_event(event: &str) -> bool {
+    matches!(
+        event,
+        "control.stop" | "control.pause-toggle" | "control.snap"
+    )
+}
+
+#[tauri::command]
+fn send_control_event(event: String, writer: tauri::State<'_, SharedWriter>) -> Result<(), String> {
+    let event = event.trim();
+    if !is_supported_control_event(event) {
+        return Err("unsupported control event".to_string());
+    }
+    writer.send_control(event)
+}
+
 #[tauri::command]
 fn frontend_ready(frontend_bridge: tauri::State<'_, FrontendBridge>) {
     frontend_bridge.mark_ready();
@@ -196,6 +212,7 @@ fn main() {
         .manage(frontend_bridge.clone())
         .invoke_handler(tauri::generate_handler![
             request_stop,
+            send_control_event,
             frontend_ready,
             drain_events
         ])
@@ -341,7 +358,7 @@ fn clip_log_text(input: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod bridge_tests {
-    use super::{should_emit_events_available, FrontendBridge};
+    use super::{is_supported_control_event, should_emit_events_available, FrontendBridge};
     use serde_json::json;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -370,6 +387,14 @@ mod bridge_tests {
         assert!(!should_emit_events_available(true, true, 1));
         assert!(!should_emit_events_available(true, false, 0));
         assert!(should_emit_events_available(true, false, 2));
+    }
+
+    #[test]
+    fn validates_supported_control_events() {
+        assert!(is_supported_control_event("control.stop"));
+        assert!(is_supported_control_event("control.pause-toggle"));
+        assert!(is_supported_control_event("control.snap"));
+        assert!(!is_supported_control_event("control.unknown"));
     }
 }
 

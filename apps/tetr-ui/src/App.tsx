@@ -99,6 +99,7 @@ export default function App() {
   const [fontSizePx, setFontSizePx] = useState(11);
   const [bgColor, setBgColor] = useState("#121b2d");
   const [bgOpacityPercent, setBgOpacityPercent] = useState(100);
+  const [paused, setPaused] = useState(false);
 
   const textRef = useRef("");
   const readySentRef = useRef(false);
@@ -162,7 +163,16 @@ export default function App() {
         }
         case "session.error": {
           const message = (payload as { message?: string }).message ?? "unknown";
+          textRef.current = `❌ ${message}`;
+          setDisplayText(textRef.current);
           console.warn("[tetr-ui] session error", message);
+          break;
+        }
+        case "session.control": {
+          const nextPaused = (payload as { paused?: unknown }).paused;
+          if (typeof nextPaused === "boolean") {
+            setPaused(nextPaused);
+          }
           break;
         }
         case "session.stopped":
@@ -246,8 +256,36 @@ export default function App() {
     [fontSizePx, bgR, bgG, bgB, bgAlpha]
   );
 
+  const sendControlEvent = async (event: string) => {
+    try {
+      await invoke("send_control_event", { event });
+    } catch (error) {
+      console.warn("[tetr-ui] send_control_event failed", event, error);
+    }
+  };
+
   return (
     <div className="panel" style={panelStyle}>
+      <div className="toolbar">
+        <button
+          type="button"
+          className={`toolbar-btn ${paused ? "active" : ""}`}
+          onClick={() => {
+            void sendControlEvent("control.pause-toggle");
+          }}
+        >
+          {paused ? "▶ 开始" : "⏸ 暂停"}
+        </button>
+        <button
+          type="button"
+          className="toolbar-btn"
+          onClick={() => {
+            void sendControlEvent("control.snap");
+          }}
+        >
+          📋 快照翻译
+        </button>
+      </div>
       <div className="translation-layer" ref={translationScrollRef}>
         <div className="translation-text">{displayText}</div>
       </div>

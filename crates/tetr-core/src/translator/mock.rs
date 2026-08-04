@@ -1,4 +1,4 @@
-use super::{TranslateError, TranslationMeta, Translator};
+use super::{TranslateError, TranslationMeta, TranslationRequest, Translator};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Default)]
@@ -11,11 +11,11 @@ impl Translator for MockTranslator {
 
     fn stream_translate(
         &self,
-        input: &str,
+        request: &TranslationRequest,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<TranslationMeta, TranslateError> {
         let started = Instant::now();
-        let synthetic = format!("【模拟翻译】{}", input.trim());
+        let synthetic = format!("【模拟翻译】{}", request.input.trim());
         let mut output_chars = 0usize;
 
         for chunk in synthetic.as_bytes().chunks(12) {
@@ -27,7 +27,7 @@ impl Translator for MockTranslator {
         Ok(TranslationMeta {
             provider: self.provider_name().to_string(),
             model: "mock-stream".to_string(),
-            input_chars: input.chars().count(),
+            input_chars: request.input.chars().count(),
             output_chars,
             latency_ms: started.elapsed().as_millis(),
             truncated: false,
@@ -46,7 +46,7 @@ mod tests {
 
         let mut cb = |delta: &str| merged.push_str(delta);
         let meta = translator
-            .stream_translate("hello", &mut cb)
+            .stream_translate(&TranslationRequest::translate("hello"), &mut cb)
             .expect("mock stream should always succeed");
 
         assert!(merged.contains("模拟翻译"));
